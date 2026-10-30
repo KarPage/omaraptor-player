@@ -31,7 +31,8 @@ Copy a link, press <kbd>Super</kbd>+<kbd>Alt</kbd>+<kbd>Y</kbd>, and the video p
 - **End-of-video ramp.** The timers turn amber, then red, and a NEXT card shows what plays next.
 - **Progress ring** around the play button, 24 ticks from twelve o'clock.
 - **PIN mode.** The frame and bar stay up as a living frame. Press <kbd>P</kbd> or the PIN tile.
-- **LIVE mode** for streams with no end: the ring and timers switch to a live readout.
+- **LIVE mode** for streams with no end: the ring and timers switch to a live readout In fullscreen the right tape shows how far you are behind the live edge.
+- **Key hints on demand.** Press `?` for every key. Its KEY HINTS switch (or `T`) shows the key letters on the buttons. They are off by default.
 - **Many players at once.** Each link opens its own window in a free corner. Size, move, fullscreen and close any of them from the keyboard, even when another app has focus.
 - **Keyboard first.** Seek by 5 or 10 seconds or jump to 0 to 90 % with the number keys, change speed, repeat, show the link. A key card on the first launch shows the basics, and <kbd>?</kbd> opens every key and mouse action.
 - **Up next.** Playlists play through. Single YouTube videos continue with the up-next mix.

@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.0.1 (2026-10-30)
+
+- Key hints are now off by default. The key-letter badges over the buttons no longer show on every hover. Turn them on or off with the KEY HINTS [ON | OFF] switch in the `?` panel (click it, or press `T` while the panel is open). The choice is kept across launches in `$XDG_STATE_HOME/omaraptor/key-hints`.
+- LIVE mode in fullscreen keeps the right-hand tape. It has no end and no countdown: it shows how far you are behind the live edge (or your watch time on streams without DVR), with a scrolling watch-time tape and the buffer or watch time at its foot. Click the tape to jump back to the live edge.
+
 ## 1.0.0 (2026-10-30)
 
 First public release.

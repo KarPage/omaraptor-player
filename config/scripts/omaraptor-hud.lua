@@ -363,9 +363,7 @@ local function layout(w, h)
     local tw2 = math.floor(u * 0.9)
     if ty1 - ty0 > u * 4 then
       b.vtape = { x = side + math.floor(u * 0.2), y = ty0, w = tw2, h = ty1 - ty0 }               -- VOL (airspeed)
-      if not is_live() then
-        b.ttape = { x = w - side - math.floor(u * 0.2) - tw2, y = ty0, w = tw2, h = ty1 - ty0 }   -- REM (altitude, countdown)
-      end
+      b.ttape = { x = w - side - math.floor(u * 0.2) - tw2, y = ty0, w = tw2, h = ty1 - ty0 }   -- REM (altitude, countdown) / LIVE tape
       -- grab areas: column + pointer box + padding, so the box itself is draggable
       local pbh, pad = math.floor(fs * 1.6), math.floor(u * 0.5)
       local vb = b.vtape
@@ -1248,11 +1246,14 @@ function remfx.state(pos, dur)
   if fn then c.frm = string.format("FRM %06d", fn) .. (fc and string.format("/%06d", fc) or "") end
   return rem, c
 end
-function remfx.sync()   -- 25 Hz only while the f22 HUD is visible and playing
-  local on = state.visible and style == "f22" and not hud.light and not mp.get_property_bool("pause")
-    and (mp.get_property_number("duration") or 0) > 0 and not is_live()
-  if on and not remfx.timer then remfx.timer = mp.add_periodic_timer(1 / 25, want)
-  elseif not on and remfx.timer then remfx.timer:kill(); remfx.timer = nil end
+function remfx.sync()   -- 25 Hz only while the f22 HUD is visible and playing; LIVE fullscreen tape: 10 Hz scroll
+  local base = state.visible and style == "f22" and not hud.light and not mp.get_property_bool("pause")
+  local lv = base and is_live()
+  local rate = lv and (mp.get_property_bool("fullscreen") and 0.1 or nil)
+    or ((base and (mp.get_property_number("duration") or 0) > 0) and 1 / 25 or nil)
+  if remfx.timer and remfx.rate ~= rate then remfx.timer:kill(); remfx.timer = nil end
+  if rate and not remfx.timer then remfx.timer = mp.add_periodic_timer(rate, want) end
+  remfx.rate = rate
 end
 local function draw_fs(ass, p, b, w, h, pos, dur)
   local u, fs, lf = p.u, p.fs, p.lf or math.floor(p.fs * 0.7)
@@ -1267,8 +1268,10 @@ local function draw_fs(ass, p, b, w, h, pos, dur)
       d:rect_cw(math.min(x, x + sx * 2), math.min(y, y + sy * L), math.max(x, x + sx * 2), math.max(y, y + sy * L))
     end
   end)
-  if not dur or dur <= 0 then return end
+  local LV = is_live()
+  if (not dur or dur <= 0) and not LV then return end
   pos = pos or 0
+  if LV then remfx.live_dur = dur; if not dur or dur <= 0 then dur = math.max(pos, 1) end end   -- LIVE: tapes end at "now"
   local long = dur >= 3600
   -- 2. heading tape: +/- 60 s around now, click = seek there
   local r = b.htape
@@ -1361,7 +1364,59 @@ local function draw_fs(ass, p, b, w, h, pos, dur)
   -- 4. REM tape (right, altitude style): COUNTDOWN. Remaining time is the altitude: the pointer
   -- descends to T-00:00 at the bottom; labels are remaining time. Drag / click seeks to dur - rem.
   local tr = b.ttape
-  if tr then
+  if tr and LV then   -- LIVE tape: no end, no countdown. Watch time climbs (tape scrolls down, 5 s
+    -- ticks), the ON AIR index box reads elapsed watch time, the foot reads how far behind the live
+    -- edge you are (DVR streams) or the buffer. Click = jump to the live edge.
+    local bx, y0, y1 = tr.x, tr.y, tr.y + tr.h
+    local thot = state.hot == "ttape"
+    local abs = remfx.cur(pos)
+    local pth = mp.get_property("path") or ""
+    if live.p0k ~= pth then live.p0k, live.p0 = pth, abs end      -- watch time counts from where you joined
+    local cur = math.max(0, abs - (live.p0 or abs))
+    local span = math.max(60, math.floor(tr.h / (fs * 0.5)))          -- seconds shown over the column
+    local ny = y0 + math.floor(tr.h * 0.35)                            -- "now" index: a third of future above
+    local pps = tr.h / span
+    local paused = mp.get_property_bool("pause")
+    local LC = paused and AMBER or ACCENT
+    if thot and tr.grab then
+      local gr = tr.grab
+      shape(ass, ACCENT, 0x70, function(d) outline(d, gr.x, gr.y, gr.w, gr.h, 1) end)
+    end
+    shape(ass, INK, 0x90, function(d) d:rect_cw(bx, y0 - math.floor(fs * 1.7), tr.x + tr.w + math.floor(lf * 0.6), y1 + math.floor(fs * 1.8)) end)
+    shape(ass, thot and ACCENT or "FFFFFF", thot and 0x00 or 0x90, function(d) d:rect_cw(bx, y0, bx + (thot and 2 or 1), y1) end)
+    local past, ahead = {}, {}
+    local tlo, thi = cur - (y1 - ny) / pps, cur + (ny - y0) / pps
+    for t = math.ceil(tlo / 5) * 5, thi, 5 do
+      if t >= 0 then
+        local y = math.floor(ny + (cur - t) * pps)
+        local isM = t % 30 == 0
+        local len = isM and math.floor(tr.w * 0.5) or math.floor(tr.w * 0.25)
+        local list = t <= cur and past or ahead
+        list[#list + 1] = { y, len }
+        if isM and t <= cur and math.abs(y - ny) > fs * 1.2 then
+          mtext(ass, bx + math.floor(tr.w * 0.6), y, lf, ACCENT, 0x10, lbl_t(t, cur >= 3600), 4, "\\fsp0")
+        end
+      end
+    end
+    if #ahead > 0 then shape(ass, "FFFFFF", 0xB0, function(d) for _, k in ipairs(ahead) do d:rect_cw(bx, k[1], bx + k[2], k[1] + 2) end end) end
+    if #past > 0 then shape(ass, ACCENT, 0x20, function(d) for _, k in ipairs(past) do d:rect_cw(bx, k[1], bx + k[2], k[1] + 2) end end) end
+    shape(ass, LC, 0x00, function(d) d:rect_cw(bx, ny, bx + 4, y1) end)                 -- watched bar
+    shape(ass, ALERT, paused and 0x60 or 0x00, function(d) d:rect_cw(tr.x + tr.w - math.floor(fs * 4.6), y0 - math.floor(fs * 1.35),
+      tr.x + tr.w - math.floor(fs * 4.0), y0 - math.floor(fs * 0.75)) end)            -- square ON AIR lamp
+    mtext(ass, tr.x + tr.w, y0 - math.floor(fs * 1.0), math.floor(fs * 0.85), LC, 0x00, paused and "HOLD" or "LIVE", 6, "\\fsp3")
+    local ld = remfx.live_dur
+    local foot, boxt
+    if ld and ld > 0 then                                              -- DVR stream: box = behind the live edge
+      boxt = tms(math.max(0, ld - abs), math.floor(fs * 1.15), 0x50, "-")
+      foot = "WATCH " .. dtime(cur)
+    else                                                               -- no DVR: box = watch time
+      boxt = tms(cur, math.floor(fs * 1.15), 0x50, "+")
+      foot = string.format("BUF %02ds", math.floor(mp.get_property_number("demuxer-cache-duration") or 0))
+    end
+    mtext(ass, tr.x + tr.w, y1 + math.floor(fs * 1.1), lf, "FFFFFF", 0x60, foot, 6, "\\fsp2")
+    ptr_box(ass, bx - 2, ny, -1, boxt, math.floor(fs * 1.15), LC,
+      math.floor(fs * 6.6), math.floor(fs * 1.6), thot and "hot" or nil)
+  elseif tr then
     local bx = tr.x
     local y1, y0 = tr.y + tr.h, tr.y
     local function ry_(rem) return math.floor(y1 - math.max(0, math.min(1, rem / dur)) * tr.h) end
@@ -2137,7 +2192,7 @@ render = function()
     if name == "new" then g_line(ass, r, col, al, true, k)
     else mtext(ass, r.x + r.w / 2, r.y + r.h / 2, math.floor(p.fs * 1.3), col, al, "?", 5) end
   end
-  if state.mhover and state.mx and inside(p, state.mx, state.my)
+  if hud.keyhints and state.mhover and state.mx and inside(p, state.mx, state.my)   -- KEY HINTS (? panel, T): off by default
     and not state.dragging and not state.vdrag then keycaps(ass, p, b) end
   local ht = state.htag                          -- hover seek tag: top z, mm:ss.mmm, clamped to the bar
   if ht and HUD() then
@@ -2310,7 +2365,18 @@ end
 
 -- keyboard panel ("?"): the whole key map in three columns (PLAYBACK / SOUND · VIEW / COCKPIT).
 -- Static table: nothing is read from disk when it opens. Esc, ? or a click outside closes it.
-local tips = { box = nil }
+local tips = { box = nil, tog = nil }
+-- KEY HINTS: the key-letter badges over the buttons on hover. OFF by default; toggled in the "?"
+-- panel (click or T) and kept across launches as one tiny file (read once here, written on toggle).
+do
+  local base = os.getenv("XDG_STATE_HOME")
+  if not base or base == "" then base = (os.getenv("HOME") or "") .. "/.local/state" end
+  tips.KH_DIR = base .. "/omaraptor"
+  tips.KH_FILE = tips.KH_DIR .. "/key-hints"
+  local f = io.open(tips.KH_FILE, "r")
+  hud.keyhints = f and (f:read("*l") == "on") or false
+  if f then f:close() end
+end
 local ov_tips = mp.create_osd_overlay("ass-events")
 ov_tips.z = 30
 local function ulen(str) return select(2, str:gsub("[^\128-\191]", "")) end
@@ -2324,7 +2390,8 @@ local KEY_COLS = {
     { "-  =  S", "smaller · larger · cycle" }, { "C", "subtitles" }, { "I", "link / signal info" } } },
   { "COCKPIT", {
     { "H", "arm panel (CRUISE ↔ COMBAT)" }, { "ENTER", "throw switch (in panel)" },
-    { "O", "new window · paste link" }, { "P", "pin frame + bar" }, { "?", "this panel" }, { "Q", "quit" } } },
+    { "O", "new window · paste link" }, { "P", "pin frame + bar" }, { "?", "this panel" }, { "Q", "quit" },
+    { "T", "key hints on / off (here)" } } },
 }
 local KEY_FOOT = "click  play · pause   ·   double-click  fullscreen   ·   drag  move   ·   wheel  volume"
 
@@ -2383,7 +2450,31 @@ local function render_tips()
   ev(string.format("\\1c&H%s&\\1a&H1C&\\p1}%s{\\p0}", INK, rect(px, py, px + pw, py + ph)))
   ev(string.format("\\1c&H%s&\\1a&H30&\\p1}%s{\\p0}", ACCENT, frame(px, py, pw, ph, bt)))
   txt(px + inner, py + math.floor(head_h * 0.5), 4, math.floor(fs * 1.15), ACCENT, 0, "KEYBOARD", "\\b1\\fsp1")
-  txt(px + pw - inner, py + math.floor(head_h * 0.5), 6, math.floor(fs * 0.8), AMBER, 0, "?  /  ESC  CLOSE", "\\fsp1")
+  local hy, cf = py + math.floor(head_h * 0.5), math.floor(fs * 0.8)
+  txt(px + pw - inner, hy, 6, cf, AMBER, 0, "?  /  ESC  CLOSE", "\\fsp1")
+  do   -- KEY HINTS [ON | OFF] switch, left of CLOSE: two square cells, the live one filled jade
+    local ON = hud.keyhints
+    local cx1 = px + pw - inner - math.floor(ulen("?  /  ESC  CLOSE") * 0.66 * cf) - math.floor(fs * 1.6)
+    local sw, sh = math.floor(fs * 2.6), math.floor(fs * 1.4)
+    local lbl = "KEY HINTS"
+    local tw = math.floor(fs * 1.4) + math.floor(fs * 0.5) + math.floor(ulen(lbl) * 0.66 * cf) + math.floor(fs * 0.7) + 2 * sw
+    if cx1 - tw < px + inner + math.floor(8 * 0.7 * fs * 1.15) + fs then lbl = "HINTS"
+      tw = tw - math.floor(4 * 0.66 * cf) end
+    local sx0, sy0 = cx1 - 2 * sw, hy - math.floor(sh / 2)
+    local cells = { { "ON", sx0, ON }, { "OFF", sx0 + sw, not ON } }
+    for _, c in ipairs(cells) do
+      if c[3] then ev(string.format("\\1c&H%s&\\1a&H00&\\p1}%s{\\p0}", ACCENT, rect(c[2], sy0, c[2] + sw, sy0 + sh))) end
+      ev(string.format("\\1c&H%s&\\1a&H%02X&\\p1}%s{\\p0}", ACCENT, c[3] and 0x00 or 0x40, frame(c[2], sy0, sw, sh, bt)))
+      txt(c[2] + math.floor(sw / 2), hy, 5, cf, c[3] and INK or ACCENT, c[3] and 0 or 0x50, c[1], "\\b1\\fsp1")
+    end
+    local lx = sx0 - math.floor(fs * 0.7)
+    txt(lx, hy, 6, cf, ACCENT, 0, lbl, "\\fsp1")
+    local kw = math.floor(fs * 1.4)
+    local kx = lx - math.floor(ulen(lbl) * 0.66 * cf) - math.floor(fs * 0.5) - kw
+    ev(string.format("\\1c&H%s&\\1a&H10&\\p1}%s{\\p0}", ACCENT, frame(kx, sy0, kw, sh, bt)))
+    txt(kx + math.floor(kw / 2), hy, 5, cf, ACCENT, 0, "T", "\\b1")
+    tips.tog = { x = kx - 4, y = sy0 - 4, w = cx1 - kx + 8, h = sh + 8 }   -- whole switch (key cap .. OFF) is the hit area
+  end
   local caps, lines = {}, {}
   for gi, g in ipairs(per) do
     local x0 = px + inner + (gi - 1) * (colw + gap)
@@ -2411,7 +2502,7 @@ local function render_tips()
   txt(px + inner, py + ph - math.floor(foot_h * 0.55), 4, math.floor(fs * 0.75), "AAAAAA", 0x30, KEY_FOOT, "\\fsp1")
   ov_tips.res_x, ov_tips.res_y, ov_tips.data = w, h, table.concat(out, "\n")
   ov_tips:update()
-  mp.set_property_native("user-data/omaraptor-hud-tips", { open = true, cols = nc, fs = fs, box = tips.box })
+  mp.set_property_native("user-data/omaraptor-hud-tips", { open = true, cols = nc, fs = fs, box = tips.box, tog = tips.tog, keyhints = hud.keyhints })
 end
 
 local function close_tips()
@@ -2433,9 +2524,19 @@ local function open_tips()
   show()
 end
 local function toggle_tips() if tips_open then close_tips() else open_tips() end end
+function tips.keyhints_toggle()   -- KEY HINTS on / off: persists as <state>/omaraptor/key-hints ("on"; absent = off)
+  hud.keyhints = not hud.keyhints
+  mp.command_native({ name = "subprocess", args = { "mkdir", "-p", tips.KH_DIR }, playback_only = false,
+    capture_stdout = true, capture_stderr = true })
+  local f = io.open(tips.KH_FILE, "w")
+  if f then f:write(hud.keyhints and "on\n" or "off\n"); f:close() end
+  mp.set_property_native("user-data/omaraptor-hud-keyhints", hud.keyhints)
+  if tips_open then render_tips() end
+end
 local function tips_click(e)
   if e.event ~= "down" and e.event ~= "press" then return end
   local m, b = mp.get_property_native("mouse-pos"), tips.box
+  if m and tips.tog and inside(tips.tog, m.x, m.y) then tips.keyhints_toggle(); return end
   if not (m and b and inside(b, m.x, m.y)) then close_tips() end   -- inside: nothing (no pause)
 end
 
@@ -2513,6 +2614,7 @@ local function drag_apply(name, m, final)
     mp.set_property_number("volume", v)
     if v > 0 and mp.get_property_bool("mute") then mp.set_property_bool("mute", false) end
   elseif name == "ttape" then                         -- countdown tape: y = remaining time
+    if is_live() then return end                      -- LIVE tape: click jumps to the edge (click())
     if final and state.grab_box and not state.drag_moved then return end
     local dur = mp.get_property_number("duration")
     if not dur or dur <= 0 then return end
@@ -2550,6 +2652,15 @@ local function click(e)
   if e.event == "repeat" then return end
   local name = m and hit(m.x, m.y)
   if not name then return end                     -- bar padding: swallow, do nothing
+  if name == "ttape" and is_live() then              -- LIVE tape: click = back to the live edge
+    if e.event == "down" or e.event == "press" then
+      local d = mp.get_property_number("duration")
+      if d and d > 0 then mp.commandv("seek", tostring(math.max(0, d - 1)), "absolute") end
+      if mp.get_property_bool("pause") then mp.set_property_bool("pause", false) end
+      set_status("LIVE EDGE"); show()
+    end
+    return
+  end
   if name == "vgauge" or name == "vtape" or name == "ttape" or name == "htape" then
     state.vdrag = e.event == "down" and name or false
     state.grab_dy, state.grab_box, state.drag_moved = 0, false, false
@@ -2612,12 +2723,16 @@ mp.input_define_section(HELP_SECTION,
   "MBTN_RIGHT script-binding " .. me .. "/nop\n", "force")
 mp.add_key_binding(nil, "tips-click", tips_click, { complex = true })
 mp.add_key_binding(nil, "tips-close", close_tips)
+mp.add_key_binding(nil, "tips-keyhints", function() tips.keyhints_toggle() end)
+mp.set_property_native("user-data/omaraptor-hud-keyhints", hud.keyhints)
 mp.input_define_section(TIPS_SECTION,
   "MBTN_LEFT script-binding " .. me .. "/tips-click\n" ..
   "MBTN_LEFT_DBL script-binding " .. me .. "/nop\n" ..
   "MBTN_RIGHT script-binding " .. me .. "/nop\n" ..
   "ESC script-binding " .. me .. "/tips-close\n" ..
   "? script-binding " .. me .. "/tips-close\n" ..
+  "t script-binding " .. me .. "/tips-keyhints\n" ..
+  "T script-binding " .. me .. "/tips-keyhints\n" ..
   "WHEEL_UP script-binding " .. me .. "/nop\n" ..
   "WHEEL_DOWN script-binding " .. me .. "/nop\n", "force")
 mp.add_key_binding("?", "tips", toggle_tips)
@@ -2917,7 +3032,7 @@ local function vol_pop(kind)
 end
 mp.add_timeout(1.5, function() volfx.ready = true end)   -- not for the startup values
 mp.observe_property("mute", "bool", function() refresh(); vol_pop() end)
-mp.observe_property("fullscreen", "bool", refresh)   -- swaps the fullscreen button icon
+mp.observe_property("fullscreen", "bool", function(...) refresh(...); remfx.sync() end)   -- swaps the fullscreen button icon; LIVE tape clock
 mp.observe_property("volume", "number", function() refresh(); vol_pop() end)
 mp.observe_property("duration", "number", refresh)
 mp.observe_property("speed", "number", function() refresh(); vol_pop("spd") end)
@@ -3825,7 +3940,7 @@ mp.register_script_message("omaraptor-hud", function(cmd, arg)
       local m = { x = tonumber(x), y = tonumber(y), hover = true }
       local real = mp.get_property_native
       mp.get_property_native = function(p, d) if p == "mouse-pos" then return m end return real(p, d) end
-      click({ event = "press" }); mp.get_property_native = real
+      ;(tips_open and tips_click or click)({ event = "press" }); mp.get_property_native = real
     end
   elseif cmd == "geom" then         -- preview: log a button's rect (and its cells) for tests
     local r = state.buttons[arg]
