@@ -1,0 +1,592 @@
+#!/bin/bash
+# OmaRaptor Player (omaraptor): a frameless, pinned, floating 16:9 YouTube window you can park in any corner.
+#
+#   omaraptor                 play the copied URL in a NEW mpv window (lightest, no page at all);
+#                           nothing usable copied: the window opens with the paste field
+#   omaraptor <url>           play <url> in a new mpv window
+#   omaraptor new             new player (the HUD's "+" button): a copied video link starts at once,
+#                           else it asks for a link
+#
+# Start-up order: an explicit <url> wins; else a video link on the clipboard plays at once
+# ("PLAYING FROM CLIPBOARD", Esc in the first seconds = undo -> paste field); else the paste
+# field. "new" skips a clipboard link it already auto-started in the last 10 minutes (the field
+# then holds it, Enter plays it again), so a second "+" does not open the same video twice.
+#   omaraptor swap [url]      swap the video in the current player instead of opening another
+#   omaraptor web             toggle the focused YouTube browser/web-app window into a
+#                           video-only floating player (and back again)
+#   omaraptor web <url>       open <url> as a Chromium web app and float it video-only
+#   omaraptor corner [next|tl|tr|bl|br]                  move the player to a corner
+#   omaraptor size [smaller|larger|small|medium|large|cycle]   resize, keeps 16:9,
+#                           anchored to the nearest screen corner
+#   omaraptor nudge [left|right|up|down]   move the player ~5% of the screen that way
+#   omaraptor fullscreen      toggle fullscreen; back again restores the floating size/spot
+#   omaraptor next            skip to the next video (playlist, else YouTube's up-next mix)
+#   omaraptor close [all]     close the current player (or every omaraptor player)
+#   omaraptor pause|mute|back|fwd   play/pause, mute, -10 s, +10 s in the mpv player (via its IPC
+#                           socket, so they work while another window has focus)
+#
+# Every "omaraptor <url>" opens its own window (own IPC socket), placed in a free corner, fully
+# on screen. The other commands act on ONE player: the one whose control bar ran them, else
+# the focused omaraptor window, else the omaraptor window you used last.
+# Uninstall: rm ~/.local/bin/omaraptor ~/.config/hypr/omaraptor.lua; rm -r ~/.config/omaraptor
+#            and remove the require("hypr.omaraptor") line from ~/.config/hypr/hyprland.lua
+
+set -euo pipefail
+
+readonly APP_ID="omaraptor"           # mpv window class
+readonly WEB_TAG="omaraptor-web"      # Hyprland tag put on a floated browser window
+readonly CONF_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/omaraptor"
+readonly RUN_DIR="${XDG_RUNTIME_DIR:-/tmp}"
+readonly SOCK0="$RUN_DIR/omaraptor-$UID.sock"   # first player keeps the old path; more: omaraptor-$UID-<pid>.sock
+# Set per command by resolve_target (the player being controlled).
+SOCK="$SOCK0" STATE="$RUN_DIR/omaraptor-$UID.corner" FS_STATE="$RUN_DIR/omaraptor-$UID.fsgeom"
+TARGET="" TARGET_ADDR=""
+readonly MARGIN=24
+readonly START_PCT=32               # starting width, % of the usable screen width
+readonly CENTER_PCT=60              # the first player opens centred at this % of the usable width
+# a first player starts with this title so the Hyprland rule (~/.config/hypr/omaraptor.lua) maps it
+# centred at CENTER_PCT from its very first frame; place_new then restores the normal title
+readonly CENTER_TITLE='OmaRaptor Player | ${media-title}'
+readonly CLIP_SEEN="$RUN_DIR/omaraptor-$UID.clipseen"   # last clipboard link auto-started: hash + time
+readonly CLIP_DEDUPE_S=600
+# video sites a clipboard link may auto-start from (scheme + host checked; anything else -> paste field)
+readonly CLIP_HOSTS='^((www|m|music)\.)?youtube(-nocookie)?\.com$|^youtu\.be$|^((www|mobile)\.)?(x|twitter)\.com$|^((www|m)\.)?twitch\.tv$|^((www|m)\.)?tiktok\.com$'
+unset OMARAPTOR_CLIPSTART OMARAPTOR_PREFILL   # never inherited from a player that ran us
+readonly WEB_KEY_DELAY=${OMARAPTOR_WEB_DELAY:-3}   # seconds for a new web app's player to load
+
+notify() { command -v notify-send >/dev/null && notify-send -a "OmaRaptor Player" "OmaRaptor Player" "$1" || echo "omaraptor: $1" >&2; }
+
+hypr_dispatch() {
+  # Lua dispatcher first (Omarchy 4 / Hyprland Lua config), legacy dispatcher as fallback.
+  local lua="$1" out; shift
+  out=$(hyprctl dispatch "$lua" 2>&1) && [[ -z $out || $out == ok ]] && return 0
+  hyprctl dispatch "$@" >/dev/null
+}
+
+player_running() { [[ -n $SOCK && -S $SOCK ]] && printf '{"command":["get_property","pid"]}\n' | socat -t1 - "UNIX-CONNECT:$SOCK" >/dev/null 2>&1; }
+# sock_pid <socket>: prints the pid of the mpv behind it (fails if nobody answers).
+sock_pid() {
+  [[ -S $1 ]] || return 1
+  printf '{"command":["get_property","pid"]}\n' | socat -t0.3 - "UNIX-CONNECT:$1" 2>/dev/null | jq -er 'select(.error == "success") | .data' 2>/dev/null
+}
+# sock_for_pid <pid>: the IPC socket of that omaraptor mpv.
+sock_for_pid() {
+  local s="$RUN_DIR/omaraptor-$UID-$1.sock"
+  [[ -S $s ]] && { echo "$s"; return 0; }
+  [[ $(sock_pid "$SOCK0") == "$1" ]] && { echo "$SOCK0"; return 0; }
+  return 1
+}
+use_sock() { SOCK=$1; [[ -n $SOCK ]] || SOCK="$SOCK0"; STATE="${SOCK%.sock}.corner"; FS_STATE="${SOCK%.sock}.fsgeom"; }
+
+# resolve_target: pick the player a command acts on.
+#   1. run from a player's own control bar (parent process is that mpv) -> that player
+#   2. the focused window, if it is a omaraptor player
+#   3. the omaraptor player focused most recently
+resolve_target() {
+  local clients act pid
+  clients=$(hyprctl clients -j 2>/dev/null) || clients='[]'
+  if [[ $(cat "/proc/$PPID/comm" 2>/dev/null) == mpv ]]; then
+    TARGET=$(jq -cer --argjson p "$PPID" --arg c "$APP_ID" 'first(.[] | select(.class == $c and .pid == $p)) // empty' <<<"$clients") || TARGET=""
+  fi
+  if [[ -z $TARGET ]]; then
+    act=$(hyprctl activewindow -j 2>/dev/null) || act='{}'
+    if jq -e --arg c "$APP_ID" --arg t "$WEB_TAG" '.class == $c or any(.tags[]?; startswith($t))' <<<"$act" >/dev/null 2>&1; then
+      TARGET=$(jq -c . <<<"$act")
+    else
+      TARGET=$(jq -cer --arg c "$APP_ID" --arg t "$WEB_TAG" '
+        [.[] | select(.class == $c or any(.tags[]?; startswith($t)))] | sort_by(.focusHistoryID) | first // empty' <<<"$clients") || TARGET=""
+    fi
+  fi
+  if [[ -n $TARGET ]]; then
+    TARGET_ADDR=$(jq -r .address <<<"$TARGET")
+    if [[ $(jq -r .class <<<"$TARGET") == "$APP_ID" ]]; then
+      pid=$(jq -r .pid <<<"$TARGET")
+      use_sock "$(sock_for_pid "$pid" || true)"
+      [[ -S $SOCK ]] || SOCK=""
+    else
+      SOCK=""   # browser window: no mpv socket
+    fi
+  else
+    use_sock "$SOCK0"; [[ -S $SOCK ]] || SOCK=""
+  fi
+}
+ipc() { printf '%s\n' "$1" | socat -t1 - "UNIX-CONNECT:$SOCK" >/dev/null 2>&1; }
+# Fire-and-forget for the media keys: no 1 s wait for a reply.
+ipc_quick() { printf '%s\n' "$@" | socat -t0.2 - "UNIX-CONNECT:$SOCK" >/dev/null 2>&1; }
+
+media() { # media <pause|mute|back|fwd>: one mpv command plus a flash of the hover square
+  local cmd label=""
+  case $1 in
+    pause) cmd='["cycle","pause"]' ;;
+    mute)  cmd='["cycle","mute"]' ;;
+    back)  cmd='["seek",-10]'; label="-10s" ;;
+    fwd)   cmd='["seek",10]';  label="+10s" ;;
+  esac
+  [[ -n $SOCK && -S $SOCK ]] && ipc_quick "{\"command\":$cmd}" \
+    "{\"command\":[\"script-message\",\"omaraptor-hud\",\"flash\",\"$label\"]}" ||
+    notify "No omaraptor player is open (SUPER+ALT+Y starts one)"
+}
+
+# The player window being controlled (fresh from Hyprland, by address; see resolve_target).
+player_client() {
+  [[ -n $TARGET_ADDR ]] || return 1
+  hyprctl clients -j 2>/dev/null | jq -cer --arg a "$TARGET_ADDR" 'first(.[] | select(.address == $a)) // empty'
+}
+
+# Prints: address width height usable_x usable_y usable_w usable_h   (for one client JSON)
+geometry_of() {
+  local client=$1 addr w h mon monitor
+  read -r addr w h mon < <(jq -r '[.address, .size[0], .size[1], .monitor] | @tsv' <<<"$client")
+  monitor=$(hyprctl monitors -j | jq -cer --argjson id "$mon" 'first(.[] | select(.id == $id))') || return 1
+  # Usable area = logical monitor size minus reserved space (the bar).
+  jq -r --arg a "$addr" --argjson w "$w" --argjson h "$h" '
+    (((.transform // 0) % 2) == 1) as $rot
+    | ((if $rot then .height else .width end) / .scale | floor) as $mw
+    | ((if $rot then .width else .height end) / .scale | floor) as $mh
+    | (.reserved // [0,0,0,0]) as $r
+    | [$a, $w, $h, (.x + $r[0]), (.y + $r[1]), ($mw - $r[0] - $r[2]), ($mh - $r[1] - $r[3])] | @tsv' <<<"$monitor"
+}
+
+window_geometry() { local c; c=$(player_client) || return 1; geometry_of "$c"; }
+
+place_at() { # place_at <address> <corner> <w> <h> <ux> <uy> <uw> <uh>
+  local addr=$1 corner=$2 w=$3 h=$4 ux=$5 uy=$6 uw=$7 uh=$8 x y
+  case $corner in
+    tl) x=$((ux + MARGIN));          y=$((uy + MARGIN)) ;;
+    tr) x=$((ux + uw - w - MARGIN)); y=$((uy + MARGIN)) ;;
+    bl) x=$((ux + MARGIN));          y=$((uy + uh - h - MARGIN)) ;;
+    center) x=$((ux + (uw - w) / 2)); y=$((uy + (uh - h) / 2)) ;;
+    *)  x=$((ux + uw - w - MARGIN)); y=$((uy + uh - h - MARGIN)); corner=br ;;
+  esac
+  local win="address:$addr"
+  hypr_dispatch "hl.dsp.window.resize({ window = \"$win\", x = $w, y = $h })" resizewindowpixel "exact $w $h,$win"
+  hypr_dispatch "hl.dsp.window.move({ window = \"$win\", x = $x, y = $y })" movewindowpixel "exact $x $y,$win"
+  echo "$corner" >"$STATE"
+}
+
+place() { # place <corner> [width height]
+  local addr w h ux uy uw uh
+  read -r addr w h ux uy uw uh < <(window_geometry) || { notify "Player window not found"; exit 1; }
+  place_at "$addr" "$1" "${2:-$w}" "${3:-$h}" "$ux" "$uy" "$uw" "$uh"
+}
+
+current_corner() { [[ -f $STATE ]] && cat "$STATE" || echo br; }
+
+# toggle_fullscreen: player to fullscreen and back to the exact floating size/spot it had.
+toggle_fullscreen() {
+  local c addr fs x y w h i
+  c=$(player_client) || { notify "Player window not found"; exit 1; }
+  addr=$(jq -r .address <<<"$c"); fs=$(jq -r '.fullscreen // 0' <<<"$c")
+  if [[ $fs != 0 && $fs != false ]]; then
+    if player_running; then ipc '{"command":["set_property","fullscreen",false]}'
+    else hypr_dispatch "hl.dsp.window.fullscreen({ window = \"address:$addr\", action = \"unset\" })" fullscreenstate "0 0,address:$addr"; fi
+    for i in 1 2 3 4 5 6 7 8 9 10; do   # wait for Hyprland to leave fullscreen
+      sleep 0.05; c=$(player_client) || break
+      [[ $(jq -r '.fullscreen // 0' <<<"$c") =~ ^(0|false)$ ]] && break
+    done
+    if [[ -s $FS_STATE ]]; then
+      read -r x y w h <"$FS_STATE"
+      local win="address:$addr"
+      hypr_dispatch "hl.dsp.window.resize({ window = \"$win\", x = $w, y = $h })" resizewindowpixel "exact $w $h,$win"
+      hypr_dispatch "hl.dsp.window.move({ window = \"$win\", x = $x, y = $y })" movewindowpixel "exact $x $y,$win"
+      rm -f "$FS_STATE"
+    fi
+  else
+    jq -r '"\(.at[0]) \(.at[1]) \(.size[0]) \(.size[1])"' <<<"$c" >"$FS_STATE"
+    if player_running; then ipc '{"command":["set_property","fullscreen",true]}'
+    else hypr_dispatch "hl.dsp.window.fullscreen({ window = \"address:$addr\", action = \"set\" })" fullscreenstate "2 2,address:$addr"; fi
+  fi
+}
+
+# nudge_player <left|right|up|down>: move the player ~5% of the screen, kept on screen with MARGIN.
+nudge_player() {
+  local c addr w h ux uy uw uh x y dx=0 dy=0
+  c=$(player_client) || { notify "Player window not found"; exit 1; }
+  read -r addr w h ux uy uw uh < <(geometry_of "$c")
+  read -r x y < <(jq -r '.at | @tsv' <<<"$c")
+  case $1 in
+    left) dx=$((-uw * 5 / 100)) ;; right) dx=$((uw * 5 / 100)) ;;
+    up) dy=$((-uh * 5 / 100)) ;; down) dy=$((uh * 5 / 100)) ;;
+    *) echo "usage: omaraptor nudge [left|right|up|down]" >&2; exit 2 ;;
+  esac
+  x=$((x + dx)); y=$((y + dy))
+  ((x > ux + uw - w - MARGIN)) && x=$((ux + uw - w - MARGIN)); ((x < ux + MARGIN)) && x=$((ux + MARGIN))
+  ((y > uy + uh - h - MARGIN)) && y=$((uy + uh - h - MARGIN)); ((y < uy + MARGIN)) && y=$((uy + MARGIN))
+  local win="address:$addr"
+  hypr_dispatch "hl.dsp.window.move({ window = \"$win\", x = $x, y = $y })" movewindowpixel "exact $x $y,$win"
+}
+
+# resize_player <larger|smaller|small|medium|large|cycle>: keeps 16:9 and keeps the window's
+# nearest screen corner where it is (it grows away from that corner), clamped to the screen.
+readonly PRESETS=(22 32 45)         # small / medium / large, % of the usable screen width
+resize_player() {
+  local c addr w h ux uy uw uh x y nw nh nx ny p corner
+  c=$(player_client) || { notify "Player window not found"; exit 1; }
+  read -r addr w h ux uy uw uh < <(geometry_of "$c")
+  read -r x y < <(jq -r '.at | @tsv' <<<"$c")
+  case $1 in
+    small) nw=$((uw * PRESETS[0] / 100)) ;;
+    medium) nw=$((uw * PRESETS[1] / 100)) ;;
+    large) nw=$((uw * PRESETS[2] / 100)) ;;
+    cycle) # next preset above the current width, wrapping back to small
+      nw=$((uw * PRESETS[0] / 100))
+      for p in "${PRESETS[@]}"; do
+        if ((uw * p / 100 > w + 8)); then nw=$((uw * p / 100)); break; fi
+      done ;;
+    larger)  nw=$((w * 115 / 100)) ;;
+    smaller) nw=$((w * 87 / 100)) ;;
+    *) echo "usage: omaraptor size [smaller|larger|small|medium|large|cycle]" >&2; exit 2 ;;
+  esac
+  ((nw > uw * 80 / 100)) && nw=$((uw * 80 / 100))
+  ((nw < 320)) && nw=320
+  nh=$((nw * 9 / 16))
+  if ((nh > uh - 2 * MARGIN)); then nh=$((uh - 2 * MARGIN)); nw=$((nh * 16 / 9)); fi
+  # Anchor: the window corner nearest a screen corner stays put.
+  if ((x + w / 2 < ux + uw / 2)); then nx=$x; corner=l; else nx=$((x + w - nw)); corner=r; fi
+  if ((y + h / 2 < uy + uh / 2)); then ny=$y; corner=t$corner; else ny=$((y + h - nh)); corner=b$corner; fi
+  # Would it poke off the screen? Pull it back in, with the usual corner margin.
+  ((nx + nw > ux + uw)) && nx=$((ux + uw - nw - MARGIN)); ((nx < ux)) && nx=$((ux + MARGIN))
+  ((ny + nh > uy + uh)) && ny=$((uy + uh - nh - MARGIN)); ((ny < uy)) && ny=$((uy + MARGIN))
+  local win="address:$addr"
+  hypr_dispatch "hl.dsp.window.move({ window = \"$win\", x = $nx, y = $ny })" movewindowpixel "exact $nx $ny,$win"
+  hypr_dispatch "hl.dsp.window.resize({ window = \"$win\", x = $nw, y = $nh })" resizewindowpixel "exact $nw $nh,$win"
+  hypr_dispatch "hl.dsp.window.move({ window = \"$win\", x = $nx, y = $ny })" movewindowpixel "exact $nx $ny,$win"
+  echo "$corner" >"$STATE"
+}
+
+send_key() { # send_key <address> <key>   (a plain key press to one window, no modifiers)
+  local win="address:$1" key=$2
+  if hypr_dispatch "hl.dsp.send_key_state({ mods = \"\", key = \"$key\", state = \"down\", window = \"$win\" })" sendshortcut ", $key, $win"; then
+    sleep 0.05
+    hyprctl dispatch "hl.dsp.send_key_state({ mods = \"\", key = \"$key\", state = \"up\", window = \"$win\" })" >/dev/null 2>&1 || true
+  fi
+}
+
+focus() { hypr_dispatch "hl.dsp.focus({ window = \"$1\" })" focuswindow "$1"; }
+
+is_browser() { [[ ${1,,} =~ (chrom|brave|vivaldi|edge|helium|firefox|zen|librewolf) ]]; }
+
+# Float one browser window as a video-only player.
+web_float() {
+  local client=$1 addr win w h ux uy uw uh nw
+  read -r addr w h ux uy uw uh < <(geometry_of "$client")
+  win="address:$addr"
+  [[ $(jq -r .floating <<<"$client") == true ]] ||
+    hypr_dispatch "hl.dsp.window.float({ window = \"$win\", action = \"on\" })" setfloating "$win"
+  [[ $(jq -r .pinned <<<"$client") == true ]] ||
+    hypr_dispatch "hl.dsp.window.pin({ window = \"$win\" })" pin "$win"
+  nw=$((uw * START_PCT / 100))
+  place_at "$addr" "$(current_corner)" "$nw" $((nw * 9 / 16)) "$ux" "$uy" "$uw" "$uh"
+  hypr_dispatch "hl.dsp.window.alter_zorder({ window = \"$win\", mode = \"top\" })" alterzorder "top,$win"
+  hypr_dispatch "hl.dsp.window.tag({ window = \"$win\", tag = \"+$WEB_TAG\" })" tagwindow "+$WEB_TAG" "$win"
+  # Tell the browser it is fullscreen while Hyprland keeps it a small floating window
+  # (Omarchy's SUPER+CTRL+F trick), then press YouTube's "f": the video fills the window,
+  # every bit of page and browser chrome disappears.
+  focus "$win"
+  hypr_dispatch "hl.dsp.window.fullscreen_state({ internal = 0, client = 2 })" fullscreenstate 0 2
+  sleep 0.3
+  send_key "$addr" f
+}
+
+web_unfloat() {
+  local addr win; addr=$(jq -r .address <<<"$1"); win="address:$addr"
+  focus "$win"
+  send_key "$addr" f   # leave YouTube's fullscreen player
+  sleep 0.3
+  focus "$win"
+  hypr_dispatch "hl.dsp.window.fullscreen_state({ internal = 0, client = 0 })" fullscreenstate 0 0
+  [[ $(jq -r .pinned <<<"$1") == true ]] && hypr_dispatch "hl.dsp.window.pin({ window = \"$win\" })" pin "$win"
+  hypr_dispatch "hl.dsp.window.tag({ window = \"$win\", tag = \"-$WEB_TAG\" })" tagwindow "-$WEB_TAG" "$win"
+  hypr_dispatch "hl.dsp.window.float({ window = \"$win\", action = \"off\" })" settiled "$win"
+}
+
+# fit_and_place <client-json> <corner|cascade> [n]: size the window to <=32% of the usable
+# width (and never taller than the usable height), then park it fully on screen.
+fit_and_place() {
+  local c=$1 corner=$2 n=${3:-0} addr w h ux uy uw uh nw nh x y step
+  read -r addr w h ux uy uw uh < <(geometry_of "$c") || return 1
+  nw=$w nh=$h
+  if ((nw > uw * START_PCT / 100 + 8 || nw < 200)); then nw=$((uw * START_PCT / 100)); nh=$((nw * 9 / 16)); fi
+  if ((nh > uh - 2 * MARGIN)); then nh=$((uh - 2 * MARGIN)); nw=$((nh * 16 / 9)); fi
+  if ((nw > uw - 2 * MARGIN)); then nw=$((uw - 2 * MARGIN)); nh=$((nw * 9 / 16)); fi
+  if [[ $corner == cascade ]]; then
+    # every corner is taken: step diagonally up-left from bottom-right, wrapping inside the screen
+    step=48
+    local span_x=$((uw - nw - 2 * MARGIN)) span_y=$((uh - nh - 2 * MARGIN))
+    ((span_x < 1)) && span_x=1; ((span_y < 1)) && span_y=1
+    x=$((ux + uw - nw - MARGIN - (n * step) % span_x))
+    y=$((uy + uh - nh - MARGIN - (n * step) % span_y))
+    local win="address:$addr"
+    hypr_dispatch "hl.dsp.window.resize({ window = \"$win\", x = $nw, y = $nh })" resizewindowpixel "exact $nw $nh,$win"
+    hypr_dispatch "hl.dsp.window.move({ window = \"$win\", x = $x, y = $y })" movewindowpixel "exact $x $y,$win"
+    echo br >"$STATE"
+  else
+    place_at "$addr" "$corner" "$nw" "$nh" "$ux" "$uy" "$uw" "$uh"
+  fi
+}
+
+# keep_on_screen <address>: pull a window back inside the usable area (shrinking if needed).
+keep_on_screen() {
+  local c addr w h ux uy uw uh x y nw nh
+  c=$(hyprctl clients -j | jq -cer --arg a "$1" 'first(.[] | select(.address == $a)) // empty') || return 0
+  [[ $(jq -r '.fullscreen // 0' <<<"$c") =~ ^(0|false)$ ]] || return 0
+  read -r addr w h ux uy uw uh < <(geometry_of "$c") || return 0
+  read -r x y < <(jq -r '.at | @tsv' <<<"$c")
+  nw=$w nh=$h
+  if ((nh > uh - 2 * MARGIN)); then nh=$((uh - 2 * MARGIN)); nw=$((nh * w / h)); fi
+  if ((nw > uw - 2 * MARGIN)); then nw=$((uw - 2 * MARGIN)); nh=$((nw * h / w)); fi
+  local nx=$x ny=$y
+  ((nx + nw > ux + uw - MARGIN)) && nx=$((ux + uw - nw - MARGIN)); ((nx < ux + MARGIN)) && nx=$((ux + MARGIN))
+  ((ny + nh > uy + uh - MARGIN)) && ny=$((uy + uh - nh - MARGIN)); ((ny < uy + MARGIN)) && ny=$((uy + MARGIN))
+  ((nw == w && nh == h && nx == x && ny == y)) && return 0
+  local win="address:$addr"
+  ((nw != w || nh != h)) && hypr_dispatch "hl.dsp.window.resize({ window = \"$win\", x = $nw, y = $nh })" resizewindowpixel "exact $nw $nh,$win"
+  hypr_dispatch "hl.dsp.window.move({ window = \"$win\", x = $nx, y = $ny })" movewindowpixel "exact $nx $ny,$win"
+}
+
+# center_size <uw> <uh>: the first player's size: CENTER_PCT of the usable width (>= 640 px,
+# <= 80% of the usable height), 16:9. Prints "w h".
+center_size() {
+  local uw=$1 uh=$2 w
+  w=$((uw * CENTER_PCT / 100)); ((w < 640)) && w=640
+  ((w > uh * 80 / 100 * 16 / 9)) && w=$((uh * 80 / 100 * 16 / 9))
+  ((w > uw - 2 * MARGIN)) && w=$((uw - 2 * MARGIN))
+  echo "$w $((w * 9 / 16))"
+}
+
+# place_new <pid> <socket>: wait for the new player's window. The first player (no other
+# omaraptor / floated web window) opens centred at CENTER_PCT; later ones park in the first free
+# corner (br, bl, tr, tl; cascade if all four are busy). Re-checked once the video is up.
+place_new() {
+  local pid=$1 sock=$2 c i others corner n=0 addr w h w2 h2 ux uy uw uh x y busy
+  use_sock "$sock"
+  for ((i = 0; i < 100; i++)); do
+    c=$(hyprctl clients -j | jq -cer --argjson p "$pid" --arg k "$APP_ID" 'first(.[] | select(.pid == $p and .class == $k)) // empty') && break
+    kill -0 "$pid" 2>/dev/null || return 0
+    sleep 0.1
+  done
+  [[ -n ${c:-} ]] || return 0
+  addr=$(jq -r .address <<<"$c")
+  others=$(hyprctl clients -j | jq -c --arg k "$APP_ID" --arg t "$WEB_TAG" --arg a "$addr" '
+    [.[] | select((.class == $k or any(.tags[]?; startswith($t))) and .address != $a) | [.at[0], .at[1], .size[0], .size[1]]]')
+  read -r addr w h ux uy uw uh < <(geometry_of "$c") || return 0
+  if [[ $others == "[]" ]]; then
+    read -r w h < <(center_size "$uw" "$uh")
+    read -r x y w2 < <(jq -r '"\(.at[0]) \(.at[1]) \(.size[0])"' <<<"$c")
+    if (( w2 - w > 2 || w - w2 > 2 || x - ux - (uw - w) / 2 > 2 || ux + (uw - w) / 2 - x > 2 ||
+          y - uy - (uh - h) / 2 > 2 || uy + (uh - h) / 2 - y > 2 )); then
+      place_at "$addr" center "$w" "$h" "$ux" "$uy" "$uw" "$uh"    # no rule / missed it: centre now
+    else
+      printf 'center\n' >"$STATE"                                 # the rule already mapped it centred
+    fi
+    [[ $(jq -r .title <<<"$c") == "OmaRaptor Player | "* ]] &&
+      ipc "$(jq -cn --arg t "$(sed -n 's/^title=//p' "$CONF_DIR/mpv.conf" | tail -n1)" '{command: ["set_property", "title", (if $t == "" then "${media-title}" else $t end)]}')"
+    for ((i = 0; i < 40; i++)); do    # mpv can resize itself when the stream starts: re-centre once
+      sleep 0.5
+      kill -0 "$pid" 2>/dev/null || return 0
+      printf '{"command":["get_property","video-params/dw"]}\n' | socat -t0.3 - "UNIX-CONNECT:$sock" 2>/dev/null |
+        jq -e '.error == "success"' >/dev/null 2>&1 && break
+    done
+    sleep 0.5
+    c=$(hyprctl clients -j | jq -cer --arg a "$addr" 'first(.[] | select(.address == $a)) // empty') || return 0
+    [[ $(jq -r '.fullscreen // 0' <<<"$c") =~ ^(0|false)$ ]] || return 0
+    [[ $(current_corner) == center ]] || return 0      # moved / resized by the user meanwhile
+    read -r addr w2 h2 ux uy uw uh < <(geometry_of "$c") || return 0
+    ((w2 == w)) || place_at "$addr" center "$w" "$h" "$ux" "$uy" "$uw" "$uh"
+    return 0
+  fi
+  # a centred first player doesn't block the corners: drop windows covering the screen centre
+  n=$(jq length <<<"$others")
+  others=$(jq -c --argjson cx $((ux + uw / 2)) --argjson cy $((uy + uh / 2)) '
+    [.[] | select(((.[0] <= $cx and $cx < .[0] + .[2]) and (.[1] <= $cy and $cy < .[1] + .[3])) | not)]' <<<"$others")
+  ((w > uw * START_PCT / 100 + 8 || w < 200)) && { w=$((uw * START_PCT / 100)); h=$((w * 9 / 16)); }
+  corner=cascade
+  for busy in br bl tr tl; do
+    case $busy in
+      tl) x=$((ux + MARGIN));          y=$((uy + MARGIN)) ;;
+      tr) x=$((ux + uw - w - MARGIN)); y=$((uy + MARGIN)) ;;
+      bl) x=$((ux + MARGIN));          y=$((uy + uh - h - MARGIN)) ;;
+      br) x=$((ux + uw - w - MARGIN)); y=$((uy + uh - h - MARGIN)) ;;
+    esac
+    if jq -e --argjson x "$x" --argjson y "$y" --argjson w "$w" --argjson h "$h" '
+         all(.[]; (.[0] >= $x + $w) or (.[0] + .[2] <= $x) or (.[1] >= $y + $h) or (.[1] + .[3] <= $y))' \
+         <<<"$others" >/dev/null; then corner=$busy; break; fi
+  done
+  fit_and_place "$c" "$corner" "$n"
+  # mpv can still resize itself when the stream starts; check again once video is up.
+  for ((i = 0; i < 40; i++)); do
+    sleep 0.5
+    kill -0 "$pid" 2>/dev/null || return 0
+    printf '{"command":["get_property","video-params/dw"]}\n' | socat -t0.3 - "UNIX-CONNECT:$sock" 2>/dev/null |
+      jq -e '.error == "success"' >/dev/null 2>&1 && break
+  done
+  sleep 0.5
+  keep_on_screen "$addr"
+}
+
+# launch_player [url] [clip|prefill:URL]: a brand-new mpv window with its own IPC socket. No url:
+# an empty window that asks for a link (omaraptor-hud.lua prompt; Esc closes it). "clip": the url
+# came from the clipboard (HUD shows PLAYING FROM CLIPBOARD + Esc undo). "prefill:URL": the
+# empty window's link field starts with URL.
+launch_player() {
+  local url=$1 how=${2:-} sock="" pid s clip="" prefill=""
+  [[ $how == clip ]] && clip=1
+  [[ $how == prefill:* ]] && prefill=${how#prefill:}
+  for s in "$RUN_DIR/omaraptor-$UID"-*.sock; do   # drop sockets of windows that already closed
+    [[ -e $s ]] || continue
+    pid=${s##*-}; pid=${pid%.sock}
+    [[ $pid =~ ^[0-9]+$ ]] && ! kill -0 "$pid" 2>/dev/null && rm -f "$s" "${s%.sock}.corner" "${s%.sock}.fsgeom"  || true
+  done
+  if ! sock_pid "$SOCK0" >/dev/null; then
+    rm -f "$SOCK0" "${SOCK0%.sock}.corner" "${SOCK0%.sock}.fsgeom"
+    sock=$SOCK0
+  fi
+  # no other player / floated web window: mark it for the centred Hyprland rule (see CENTER_TITLE)
+  local title=
+  hyprctl clients -j 2>/dev/null | jq -e --arg k "$APP_ID" --arg t "$WEB_TAG" \
+    'any(.[]; .class == $k or any(.tags[]?; startswith($t)))' >/dev/null 2>&1 || title=$CENTER_TITLE
+  # exec keeps the pid, so a pid-named socket can be chosen before mpv starts
+  setsid env OMARAPTOR_CLIPSTART="$clip" OMARAPTOR_PREFILL="$prefill" bash -c 'sock=$1; conf=$2; app=$3; url=$4; title=$7
+    [[ -n $sock ]] || sock="$5/omaraptor-$6-$$.sock"
+    rm -f "$sock"
+    if [[ -n $url ]]; then
+      exec mpv --config-dir="$conf" --wayland-app-id="$app" --x11-name="$app" \
+        --input-ipc-server="$sock" --force-window=immediate ${title:+"--title=$title"} -- "$url"
+    fi
+    exec mpv --config-dir="$conf" --wayland-app-id="$app" --x11-name="$app" \
+      --input-ipc-server="$sock" --force-window=immediate --idle=yes ${title:+"--title=$title"} \
+      --script-opts-append=omaraptor-hud-prompt=yes' \
+    omaraptor-launch "$sock" "$CONF_DIR" "$APP_ID" "$url" "$RUN_DIR" "$UID" "$title" </dev/null >/dev/null 2>&1 &
+  pid=$!
+  disown "$pid" 2>/dev/null || true
+  [[ -n $sock ]] || sock="$RUN_DIR/omaraptor-$UID-$pid.sock"
+  place_new "$pid" "$sock" </dev/null >/dev/null 2>&1 &
+  disown $! 2>/dev/null || true
+}
+
+# clipboard text (OMARAPTOR_TEST_CLIP replaces it in tests, so they never touch the real clipboard)
+clip_text() {
+  if [[ -v OMARAPTOR_TEST_CLIP ]]; then printf '%s' "$OMARAPTOR_TEST_CLIP"; return 0; fi
+  timeout 1 wl-paste --no-newline --type text 2>/dev/null ||
+    timeout 1 xclip -o -selection clipboard 2>/dev/null || true
+}
+# clip_link [any]: the clipboard as a playable link, else fails. Default: a link to a known video
+# site (CLIP_HOSTS); "any": any http(s) link (SUPER+ALT+Y, whose whole job is "play what I copied").
+clip_link() {
+  local u host
+  u=$(clip_text | head -c 4096 | tr -d '[:space:]') || true
+  [[ $u =~ ^https?://([^/?#:@]+)(:[0-9]+)?([/?#][^[:space:]]*)?$ ]] || return 1
+  host=${BASH_REMATCH[1],,}
+  [[ $host == *.* ]] || return 1
+  [[ ${1:-} == any || $host =~ $CLIP_HOSTS ]] || return 1
+  printf '%s' "$u"
+}
+clip_key() { printf '%s' "$1" | sha256sum | cut -c1-16; }
+clip_recent() { # clip_recent <url>: true if it was auto-started in the last CLIP_DEDUPE_S seconds
+  local k t
+  [[ -f $CLIP_SEEN ]] && read -r k t < "$CLIP_SEEN" 2>/dev/null || return 1
+  [[ $k == "$(clip_key "$1")" && $t =~ ^[0-9]+$ ]] && (( $(date +%s) - t < CLIP_DEDUPE_S ))
+}
+# start_player [new]: no explicit url. Clipboard video link -> play it now; else the paste field.
+start_player() {
+  local url
+  if [[ ${1:-} == new ]]; then url=$(clip_link) || url=""; else url=$(clip_link any) || url=""; fi
+  if [[ -z $url ]]; then launch_player ""; return; fi
+  if [[ ${1:-} == new ]] && clip_recent "$url"; then launch_player "" "prefill:$url"; return; fi
+  printf '%s %s\n' "$(clip_key "$url")" "$(date +%s)" > "$CLIP_SEEN" 2>/dev/null || true
+  launch_player "$url" clip
+}
+
+read_url() {
+  local url=${1:-}
+  [[ -z $url ]] && url=$(wl-paste --no-newline 2>/dev/null || xclip -o -selection clipboard 2>/dev/null || true)
+  url=$(printf '%s' "$url" | tr -d '[:space:]')
+  # Only real web links: no local files, no player options smuggled in from the clipboard.
+  if [[ ! $url =~ ^https?://[^[:space:]]+$ ]]; then
+    notify "That isn't a web link. Copy a YouTube URL first."
+    exit 1
+  fi
+  printf '%s' "$url"
+}
+
+web_open() {
+  local url before client i
+  url=$(read_url "${1:-}")
+  before=$(hyprctl clients -j | jq -c '[.[].address]')
+  if command -v omarchy-launch-webapp >/dev/null; then
+    setsid -f omarchy-launch-webapp "$url" >/dev/null 2>&1
+  else
+    setsid -f chromium --app="$url" >/dev/null 2>&1
+  fi
+  for ((i = 0; i < 60; i++)); do
+    sleep 0.25
+    client=$(hyprctl clients -j | jq -cer --argjson old "$before" \
+      'first(.[] | select(.address as $a | $old | index($a) | not)) // empty') && break
+  done
+  [[ -n ${client:-} ]] || { notify "The web app window didn't open"; exit 1; }
+  sleep "$WEB_KEY_DELAY"   # let the YouTube player load before pressing "f"
+  client=$(hyprctl clients -j | jq -cer --arg a "$(jq -r .address <<<"$client")" 'first(.[] | select(.address == $a))')
+  web_float "$client"
+}
+
+case ${1:-} in
+  web)
+    if [[ -n ${2:-} ]]; then web_open "$2"; exit 0; fi
+    active=$(hyprctl activewindow -j)
+    if jq -e --arg t "$WEB_TAG" 'any(.tags[]?; startswith($t))' <<<"$active" >/dev/null; then
+      web_unfloat "$active"
+    elif is_browser "$(jq -r '.class // ""' <<<"$active")"; then
+      web_float "$active"
+    else
+      web_open ""   # nothing to float: open the copied link as a web app
+    fi
+    exit 0 ;;
+  close)
+    if [[ ${2:-} == all ]]; then
+      for s in "$SOCK0" "$RUN_DIR"/omaraptor-"$UID"-*.sock; do
+        [[ -S $s ]] && printf '{"command":["quit"]}\n' | socat -t0.3 - "UNIX-CONNECT:$s" >/dev/null 2>&1 || true
+      done
+      exit 0
+    fi
+    resolve_target
+    if player_running; then ipc '{"command":["quit"]}' || true
+    elif c=$(player_client); then
+      hypr_dispatch "hl.dsp.window.close({ window = \"address:$(jq -r .address <<<"$c")\" })" closewindow "address:$(jq -r .address <<<"$c")"
+    fi
+    exit 0 ;;
+  pause|mute|back|fwd) resolve_target; media "$1"; exit 0 ;;
+  corner)
+    resolve_target
+    case ${2:-next} in
+      next) case $(current_corner) in br) c=bl ;; bl) c=tl ;; tl) c=tr ;; *) c=br ;; esac ;;
+      tl|tr|bl|br) c=$2 ;;
+      *) echo "usage: omaraptor corner [next|tl|tr|bl|br]" >&2; exit 2 ;;
+    esac
+    place "$c"; exit 0 ;;
+  size) resolve_target; resize_player "${2:-larger}"; exit 0 ;;
+  nudge) resolve_target; nudge_player "${2:-}"; exit 0 ;;
+  fullscreen) resolve_target; toggle_fullscreen; exit 0 ;;
+  new) start_player new; exit 0 ;;
+  swap)
+    url=$(read_url "${2:-}")
+    resolve_target
+    if player_running; then
+      ipc "{\"command\":[\"loadfile\",$(jq -Rn --arg u "$url" '$u'),\"replace\"]}"
+    else
+      launch_player "$url"
+    fi
+    exit 0 ;;
+  next)
+    resolve_target
+    [[ -n $SOCK && -S $SOCK ]] && ipc_quick '{"command":["script-message","omaraptor-autoplay","next"]}' ||
+      notify "No omaraptor player is open (SUPER+ALT+Y starts one)"
+    exit 0 ;;
+  -h|--help) sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+esac
+
+if [[ -n ${1:-} ]]; then          # explicit url wins
+  url=$(read_url "$1")
+  launch_player "$url"
+else
+  start_player
+fi

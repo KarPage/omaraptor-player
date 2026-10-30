@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=OmaRaptor Player
+GenericName=Floating Video Player
+Comment=Light floating HUD video player for almost any video link (mpv + yt-dlp)
+Exec=omaraptor new
+Icon=omaraptor
+Terminal=false
+Categories=AudioVideo;Video;Player;
+Keywords=video;player;youtube;twitch;tiktok;hud;raptor;omaraptor;mpv;float;live;
+StartupNotify=false
+StartupWMClass=omaraptor

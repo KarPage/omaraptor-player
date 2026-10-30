@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+# Bar button entry point: run [play|new|close].
+# First click: opens a terminal with ./install.sh, which asks before it adds its one line to
+# hyprland.lua. Later plugin updates reinstall quietly, and only when that line is already there.
+set -euo pipefail
+DIR=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)
+BIN=${XDG_BIN_HOME:-$HOME/.local/bin}; CFG=${XDG_CONFIG_HOME:-$HOME/.config}
+HYPR_MAIN=$CFG/hypr/hyprland.lua
+note() { notify-send "OmaRaptor Player" "$1" 2>/dev/null || true; }
+if [[ ! -x $BIN/omaraptor ]] || ! cmp -s "$DIR/VERSION" "$CFG/omaraptor/.installed-version"; then
+  if [[ -x $BIN/omaraptor ]] && grep -qx 'require("hypr.omaraptor")' "$HYPR_MAIN" 2>/dev/null; then
+    "$DIR/install.sh" </dev/null >/dev/null 2>&1 || { note "Update failed: run $DIR/install.sh in a terminal"; exit 1; }
+    note "Updated to $(cat "$DIR/VERSION")."
+  else
+    cmd="'$DIR/install.sh'; echo; read -r -n1 -s -p 'Press any key to close'"
+    if command -v omarchy-launch-floating-terminal-with-presentation >/dev/null; then
+      omarchy-launch-floating-terminal-with-presentation "$cmd"
+    elif command -v xdg-terminal-exec >/dev/null; then
+      setsid xdg-terminal-exec bash -c "$cmd" >/dev/null 2>&1 &
+    else
+      note "Run $DIR/install.sh in a terminal to finish installing."
+    fi
+    exit 0
+  fi
+fi
+case ${1:-play} in
+  play) exec "$BIN/omaraptor" ;;
+  new) exec "$BIN/omaraptor" new ;;
+  close) exec "$BIN/omaraptor" close all ;;
+  *) echo "usage: run [play|new|close]" >&2; exit 2 ;;
+esac

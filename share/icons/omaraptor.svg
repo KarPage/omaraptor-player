@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <!-- OmaRaptor Player mark: square HUD frame, corner brackets, square target reticle, amber lock pip -->
+  <rect x="0" y="0" width="256" height="256" fill="#0D110B"/>
+  <g fill="#2EE6A6">
+    <!-- corner brackets -->
+    <rect x="20" y="20" width="64" height="12"/><rect x="20" y="20" width="12" height="64"/>
+    <rect x="172" y="20" width="64" height="12"/><rect x="224" y="20" width="12" height="64"/>
+    <rect x="20" y="224" width="64" height="12"/><rect x="20" y="172" width="12" height="64"/>
+    <rect x="172" y="224" width="64" height="12"/><rect x="224" y="172" width="12" height="64"/>
+    <!-- square reticle -->
+    <rect x="76" y="76" width="104" height="8"/><rect x="76" y="172" width="104" height="8"/>
+    <rect x="76" y="76" width="8" height="104"/><rect x="172" y="76" width="8" height="104"/>
+    <!-- cross ticks -->
+    <rect x="124" y="44" width="8" height="24"/><rect x="124" y="188" width="8" height="24"/>
+    <rect x="44" y="124" width="24" height="8"/><rect x="188" y="124" width="24" height="8"/>
+    <!-- play chevron -->
+    <polygon points="110,100 156,128 110,156"/>
+  </g>
+  <!-- amber lock pip -->
+  <rect x="196" y="196" width="16" height="16" fill="#C9A85A"/>
+</svg>

@@ -1,0 +1,31 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.karpage.omaraptor",
+  "name": "OmaRaptor Player",
+  "version": "1.0.0",
+  "author": "KarPage",
+  "license": "MIT",
+  "description": "A free, super-light floating player for almost any video link, with no login and a working HUD inspired by the F-22 Raptor. mpv + yt-dlp, no browser.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "OmaRaptor Player",
+    "description": "Left-click plays the copied video link in a floating HUD player. Right-click opens an empty player that asks for a link. Middle-click closes every player.",
+    "category": "Media",
+    "aliases": [
+      "omaraptor",
+      "video",
+      "player",
+      "youtube",
+      "mpv"
+    ],
+    "allowMultiple": false,
+    "defaultSection": "right"
+  },
+  "repository": "https://github.com/KarPage/omaraptor-player",
+  "homepage": "https://github.com/KarPage/omaraptor-player"
+}
