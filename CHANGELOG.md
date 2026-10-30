@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.0.3 (2026-10-30)
+
+- Security fix: a video file with a fake, huge length (for example a Matroska file claiming 10^12 seconds) could make the seek tape and the REM tape build millions of tick marks. mpv then used all CPU and memory and could be killed. The tick spacing is now picked from the space on screen, so a tape never has more ticks than about one per 4 pixels, with a hard limit of 1024. The length of the video no longer decides how much is built.
+- An unknown, infinite, negative or absurd length (over about 31 years) shows no tick scale instead of a broken one.
+- The tick marks are now built once and reused until the length or the window size changes, not rebuilt on every frame.
+- Normal videos look exactly the same as in 1.0.2.
+- New test: `tests/run.sh` now plays the HUD against fake lengths from 60 seconds to 10^12 seconds, plus infinite and NaN, and fails if the drawing grows with the length.
+
 ## 1.0.2 (2026-10-30)
 
 - ARMED, then FIRE. A copied link (<kbd>Super</kbd>+<kbd>Alt</kbd>+<kbd>Y</kbd> or PASTE LINK) now loads paused in a launch console and waits. Press FIRE (click, <kbd>Enter</kbd> or <kbd>Space</kbd>) for a short countdown, then the picture expands into the HUD. <kbd>Esc</kbd> goes back to the paste screen. A typed link fires by itself.

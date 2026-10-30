@@ -708,6 +708,31 @@ local function seek_frac(x)
   return math.max(0, math.min(1, (x - r.x) / r.w))
 end
 
+-- tick scales: a tape's step comes from the pixels it has, never from the duration a media
+-- header claims. Past the NICE table the major step grows in whole 1 / 2 / 5 x 10^k hours until it
+-- fits, so a scale never holds more ticks than its size allows (TICK_MAX is a hard backstop).
+-- inf / NaN / <= 0 / > DUR_MAX (about 31 years) get no scale. Geometry is cached per tape and only
+-- rebuilt when the duration or the tape size changes, not every frame.
+local scale = { TICK_MAX = 1024, DUR_MAX = 1e9, cache = {} }
+function scale.dur(d)
+  if type(d) ~= "number" or d ~= d or d <= 0 or d > scale.DUR_MAX then return nil end
+  return d
+end
+function scale.major(NICE, fits, need)       -- need: smallest step that fits (seconds)
+  for _, v in ipairs(NICE) do if fits(v) then return v end end
+  if need ~= need or need <= 0 or need == math.huge then return nil end
+  local h = need / 3600
+  local e = 10 ^ math.floor(math.log10(h))
+  for _, m in ipairs({ 1, 2, 5, 10 }) do if m * e >= h then return math.max(NICE[#NICE], m * e * 3600) end end
+end
+function scale.cached(id, key, build)
+  local c = scale.cache[id]
+  if c and c.key == key then return c.v end
+  local v = build()
+  scale.cache[id] = { key = key, v = v }
+  return v
+end
+
 local function draw_seek(ass, p, r)
   local pos, dur = mp.get_property_number("time-pos"), mp.get_property_number("duration")
   local f = (pos and dur and dur > 0) and math.max(0, math.min(1, pos / dur)) or 0
@@ -741,37 +766,53 @@ local function draw_seek(ass, p, r)
     end
     local lw = (long and 4 or 5) * lf * 0.62
     local NICE = { 1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600, 7200, 18000 }
-    local M = NICE[#NICE]
-    for _, v in ipairs(NICE) do if (dur / v) * lw * 2.9 <= r.w then M = v; break end end
+    local sd = r.w > 0 and scale.dur(dur)
+    local M = sd and scale.major(NICE, function(v) return (dur / v) * lw * 2.9 <= r.w end, dur * lw * 2.9 / r.w)
     local pxs = r.w / dur                              -- pixels per second
-    local labels = r.w >= p.u * 9 and M * pxs >= lw * 1.6
-    local med = M * pxs / 2 >= 7
-    local sub = (M % 10 == 0 or M < 10) and M / 10 or M / 5
-    if M == 15 or M == 900 then sub = M / 5 end
-    local minor = sub * pxs >= 4 and r.w >= p.u * 7
     local tl = math.max(3, math.floor(p.u * 0.13))
     local tm = math.max(5, math.floor(p.u * 0.24))
     local tL = math.max(7, math.floor(p.u * 0.38))
     -- base line: dim ahead, jade behind the playhead
     shape(ass, "FFFFFF", 0x98, function(d) d:rect_cw(r.x, y0, r.x + r.w, y0 + 1) end)
     if px > r.x then shape(ass, ACCENT, 0x00, function(d) d:rect_cw(r.x, y0 - 1, px, y0 + 2) end) end
-    local step = minor and sub or (med and M / 2 or M)
-    local n = math.floor(dur / step + 1e-6)
-    local past, ahead = {}, {}
-    for i = 0, n do
-      local t = i * step
-      local x = math.floor(r.x + t * pxs)
-      local isM = math.abs(t / M - math.floor(t / M + 0.5)) < 1e-6
-      local isMed = not isM and math.abs((t * 2) / M - math.floor((t * 2) / M + 0.5)) < 1e-6
-      local len = isM and tL or (isMed and tm or tl)
-      local list = x <= px and past or ahead
-      list[#list + 1] = { x, len }
-    end
     local xe = r.x + r.w                               -- end-of-tape bar
-    ahead[#ahead + 1] = { xe - 1, tL }
-    shape(ass, "FFFFFF", 0x88, function(d) for _, k in ipairs(ahead) do d:rect_cw(k[1], y0 + 3, k[1] + 1, y0 + 3 + k[2]) end end)
-    if #past > 0 then
-      shape(ass, ACCENT, 0x10, function(d) for _, k in ipairs(past) do d:rect_cw(k[1], y0 + 3, k[1] + 1, y0 + 3 + k[2]) end end)
+    local sc = M and scale.cached("seek", string.format("%.17g|%.17g|%.17g|%.17g|%.17g", dur, r.x, r.w, p.u, lf), function()
+      local o = { ticks = {}, labels = {} }
+      local labels = r.w >= p.u * 9 and M * pxs >= lw * 1.6
+      local med = M * pxs / 2 >= 7
+      local sub = (M % 10 == 0 or M < 10) and M / 10 or M / 5
+      if M == 15 or M == 900 then sub = M / 5 end
+      local minor = sub * pxs >= 4 and r.w >= p.u * 7
+      local step = minor and sub or (med and M / 2 or M)
+      local n = math.floor(dur / step + 1e-6)
+      if n > scale.TICK_MAX then return o end
+      for i = 0, n do
+        local t = i * step
+        local x = math.floor(r.x + t * pxs)
+        local isM = math.abs(t / M - math.floor(t / M + 0.5)) < 1e-6
+        local isMed = not isM and math.abs((t * 2) / M - math.floor((t * 2) / M + 0.5)) < 1e-6
+        o.ticks[#o.ticks + 1] = { x, isM and tL or (isMed and tm or tl) }
+      end
+      if labels and math.floor(dur / M + 1e-6) <= scale.TICK_MAX then
+        local last = -1e9
+        for i = 0, math.floor(dur / M + 1e-6) do
+          local t = i * M
+          local x = math.floor(r.x + t * pxs)
+          if x - last >= lw * 1.4 and x + lw / 2 <= xe + lw * 0.1 then
+            o.labels[#o.labels + 1] = { x, lbl(t), (i == 0) and 7 or 8 }
+            last = x
+          end
+        end
+      end
+      return o
+    end)
+    local tk = sc and sc.ticks or {}
+    shape(ass, "FFFFFF", 0x88, function(d)
+      for _, k in ipairs(tk) do if k[1] > px then d:rect_cw(k[1], y0 + 3, k[1] + 1, y0 + 3 + k[2]) end end
+      d:rect_cw(xe - 1, y0 + 3, xe, y0 + 3 + tL)
+    end)
+    if tk[1] and tk[1][1] <= px then
+      shape(ass, ACCENT, 0x10, function(d) for _, k in ipairs(tk) do if k[1] <= px then d:rect_cw(k[1], y0 + 3, k[1] + 1, y0 + 3 + k[2]) end end end)
     end
     -- heading row above the line: the run mapped to 000-360 deg (50 % = S), ticks every 15 deg,
     -- 45 deg taller; labels N 045 E 135 S 225 W 315 N on wide tapes; jade once passed
@@ -798,18 +839,11 @@ local function draw_seek(ass, p, r)
         end
       end
     end
-    if labels then
+    if sc and #sc.labels > 0 then
       local ly = y0 + 4 + tL + math.floor(lf * 0.1)
-      local last = -1e9
-      for i = 0, math.floor(dur / M + 1e-6) do
-        local t = i * M
-        local x = math.floor(r.x + t * pxs)
-        if x - last >= lw * 1.4 and x + lw / 2 <= xe + lw * 0.1 then
-          local passed = x <= px
-          local an = (i == 0) and 7 or 8
-          mtext(ass, x, ly, lf, passed and ACCENT or "FFFFFF", passed and 0x00 or 0x60, lbl(t), an, "\\fsp0")
-          last = x
-        end
+      for _, k in ipairs(sc.labels) do
+        local passed = k[1] <= px
+        mtext(ass, k[1], ly, lf, passed and ACCENT or "FFFFFF", passed and 0x00 or 0x60, k[2], k[3], "\\fsp0")
       end
     end
     -- machined index: hairline through the tape, bevelled bug head above it, riding time tag
@@ -1271,6 +1305,7 @@ local function draw_fs(ass, p, b, w, h, pos, dur)
   local LV = is_live()
   if (not dur or dur <= 0) and not LV then return end
   pos = pos or 0
+  if pos ~= pos or math.abs(pos) == math.huge then pos = 0 end
   if LV then remfx.live_dur = dur; if not dur or dur <= 0 then dur = math.max(pos, 1) end end   -- LIVE: tapes end at "now"
   local long = dur >= 3600
   -- 2. heading tape: +/- 60 s around now, click = seek there
@@ -1433,20 +1468,25 @@ local function draw_fs(ass, p, b, w, h, pos, dur)
     shape(ass, INK, 0x90, function(d) d:rect_cw(bx, y0 - math.floor(fs * 1.7), tr.x + tr.w + math.floor(lf * 0.6), y1 + math.floor(fs * 1.8)) end)
     shape(ass, thot and ACCENT or "FFFFFF", thot and 0x00 or 0x90, function(d) d:rect_cw(bx, y0, bx + (thot and 2 or 1), y1) end)
     local NICE = { 5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600, 7200, 18000 }
-    local M = NICE[#NICE]
-    for _, v in ipairs(NICE) do if (dur / v) * fs * 2.4 <= tr.h then M = v; break end end
-    local sub = M / 2
-    local left, gone = {}, {}                         -- marks still ahead (<= rem) / already flown (> rem)
-    for r = 0, dur, sub do
-      local isM = (r / M) == math.floor(r / M)
-      local len = isM and math.floor(tr.w * 0.5) or math.floor(tr.w * 0.25)
-      local list = r <= rem and left or gone
-      list[#list + 1] = { ry_(r), len }
-      if isM then mtext(ass, bx + math.floor(tr.w * 0.6), ry_(r), lf, r <= rem and RS or "FFFFFF", r <= rem and 0x10 or 0x70,
-        (r == 0 and "T-0" or lbl_t(r, long)), 4, "\\fsp0") end
+    local sd = tr.h > 0 and scale.dur(dur)
+    local M = sd and scale.major(NICE, function(v) return (dur / v) * fs * 2.4 <= tr.h end, dur * fs * 2.4 / tr.h)
+    local marks = M and scale.cached("rem", string.format("%.17g|%.17g|%.17g|%.17g|%.17g|%.17g", dur, tr.y, tr.w, tr.h, fs, lf), function()
+      local o, sub = {}, M / 2                         -- { y, len, r, label or nil }
+      if dur / sub > scale.TICK_MAX then return o end
+      for r = 0, dur, sub do
+        local isM = (r / M) == math.floor(r / M)
+        o[#o + 1] = { ry_(r), isM and math.floor(tr.w * 0.5) or math.floor(tr.w * 0.25), r,
+          isM and (r == 0 and "T-0" or lbl_t(r, long)) or nil }
+      end
+      return o
+    end) or {}
+    local nleft, ngone = 0, 0                          -- marks still ahead (<= rem) / already flown (> rem)
+    for _, k in ipairs(marks) do
+      if k[3] <= rem then nleft = nleft + 1 else ngone = ngone + 1 end
+      if k[4] then mtext(ass, bx + math.floor(tr.w * 0.6), k[1], lf, k[3] <= rem and RS or "FFFFFF", k[3] <= rem and 0x10 or 0x70, k[4], 4, "\\fsp0") end
     end
-    if #gone > 0 then shape(ass, "FFFFFF", 0xA0, function(d) for _, k in ipairs(gone) do d:rect_cw(bx, k[1], bx + k[2], k[1] + 2) end end) end
-    if #left > 0 then shape(ass, RS, 0x20, function(d) for _, k in ipairs(left) do d:rect_cw(bx, k[1], bx + k[2], k[1] + 2) end end) end
+    if ngone > 0 then shape(ass, "FFFFFF", 0xA0, function(d) for _, k in ipairs(marks) do if k[3] > rem then d:rect_cw(bx, k[1], bx + k[2], k[1] + 2) end end end) end
+    if nleft > 0 then shape(ass, RS, 0x20, function(d) for _, k in ipairs(marks) do if k[3] <= rem then d:rect_cw(bx, k[1], bx + k[2], k[1] + 2) end end end) end
     shape(ass, RS, 0x00, function(d) d:rect_cw(bx, ry_(rem), bx + 4, y1) end)          -- remaining "fuel" bar
     mtext(ass, tr.x + tr.w, y0 - math.floor(fs * 1.0), math.floor(fs * 0.85), RC, 0x00, "REM T-", 6, "\\fsp3")
     mtext(ass, tr.x + tr.w, y1 + math.floor(fs * 1.1), lf, "FFFFFF", 0x60, "DUR " .. dtime(dur), 6, "\\fsp2")

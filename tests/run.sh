@@ -8,6 +8,9 @@ ok() { printf 'ok   %s\n' "$*"; }
 bash -n "$R"/install.sh "$R"/uninstall.sh "$R"/plugin/run "$R"/bin/omaraptor; ok "bash syntax"
 if command -v luac >/dev/null; then for f in "$R"/config/scripts/*.lua; do luac -p "$f"; done; ok "lua syntax"
 elif command -v luajit >/dev/null; then for f in "$R"/config/scripts/*.lua; do luajit -bl "$f" >/dev/null; done; ok "lua syntax"; fi
+L=$(command -v luajit || command -v lua5.1 || true)
+if [[ -n $L ]]; then for d in 60 3600 18000 1e7 1e9 1e12 -5 inf nan; do for fs in 0 1; do
+  timeout 20 "$L" "$R/tests/hud-duration.lua" "$R/config/scripts/omaraptor-hud.lua" "$d" "$fs" 20 1920 1080 >/dev/null; done; done; ok "hud ticks bounded for forged durations"; fi
 jq -e '.schemaVersion == 1 and .id == "io.github.karpage.omaraptor" and .entryPoints.barWidget == "BarWidget.qml"' "$R/manifest.json" >/dev/null; ok "manifest"
 [[ $(jq -r .version "$R/manifest.json") == "$(cat "$R/VERSION")" ]]; ok "version match"
 [[ -z $(find "$R" -type l -not -path '*/.git/*') ]]; ok "no symlinks"
