@@ -4,13 +4,11 @@
 #   omaraptor                 play the copied URL in a NEW mpv window (lightest, no page at all);
 #                           nothing usable copied: the window opens with the paste field
 #   omaraptor <url>           play <url> in a new mpv window
-#   omaraptor new             new player (the HUD's "+" button): a copied video link starts at once,
-#                           else it asks for a link
+#   omaraptor new [pid]       EMPTY player (the HUD's "+" button passes its pid): never the
+#                           clipboard; opens at 85% of that player, centred over it
 #
-# Start-up order: an explicit <url> wins; else a video link on the clipboard plays at once
-# ("PLAYING FROM CLIPBOARD", Esc in the first seconds = undo -> paste field); else the paste
-# field. "new" skips a clipboard link it already auto-started in the last 10 minutes (the field
-# then holds it, Enter plays it again), so a second "+" does not open the same video twice.
+# Start-up order: an explicit <url> wins; else a link on the clipboard comes up ARMED (it
+# preloads, FIRE plays it, Esc = back to the paste field); else the paste field.
 #   omaraptor swap [url]      swap the video in the current player instead of opening another
 #   omaraptor web             toggle the focused YouTube browser/web-app window into a
 #                           video-only floating player (and back again)
@@ -47,11 +45,12 @@ readonly CENTER_PCT=60              # the first player opens centred at this % o
 # a first player starts with this title so the Hyprland rule (~/.config/hypr/omaraptor.lua) maps it
 # centred at CENTER_PCT from its very first frame; place_new then restores the normal title
 readonly CENTER_TITLE='OmaRaptor Player | ${media-title}'
-readonly CLIP_SEEN="$RUN_DIR/omaraptor-$UID.clipseen"   # last clipboard link auto-started: hash + time
-readonly CLIP_DEDUPE_S=600
+readonly OVER_PCT=85                # "new" from a player: this % of that player's width, centred on it
+readonly OVER_MIN=560               # ...but never narrower (room for the PASTE LINK home screen)
+NEW_OVER=""                         # address of the player a "new" window opens over
 # video sites a clipboard link may auto-start from (scheme + host checked; anything else -> paste field)
 readonly CLIP_HOSTS='^((www|m|music)\.)?youtube(-nocookie)?\.com$|^youtu\.be$|^((www|mobile)\.)?(x|twitter)\.com$|^((www|m)\.)?twitch\.tv$|^((www|m)\.)?tiktok\.com$'
-unset OMARAPTOR_CLIPSTART OMARAPTOR_PREFILL   # never inherited from a player that ran us
+unset OMARAPTOR_CLIPSTART   # never inherited from a player that ran us
 readonly WEB_KEY_DELAY=${OMARAPTOR_WEB_DELAY:-3}   # seconds for a new web app's player to load
 
 notify() { command -v notify-send >/dev/null && notify-send -a "OmaRaptor Player" "OmaRaptor Player" "$1" || echo "omaraptor: $1" >&2; }
@@ -354,6 +353,33 @@ center_size() {
   echo "$w $((w * 9 / 16))"
 }
 
+# place_over <client-json> <parent-address>: an empty "new" window opened from a player: OVER_PCT
+# of that player's width (>= OVER_MIN), 16:9, centred on it and kept inside its monitor's usable
+# area, floating + pinned like every player and raised above it, so the player behind shows round
+# the edges. Fails (caller falls back to the corner logic) if the parent window is gone.
+place_over() {
+  local c=$1 p addr pw ph px py ux uy uw uh w h x y win
+  p=$(hyprctl clients -j | jq -cer --arg a "$2" 'first(.[] | select(.address == $a)) // empty') || return 1
+  read -r _ pw ph ux uy uw uh < <(geometry_of "$p") || return 1
+  read -r px py < <(jq -r '.at | @tsv' <<<"$p")
+  w=$((pw * OVER_PCT / 100)); ((w < OVER_MIN)) && w=$OVER_MIN
+  h=$((w * 9 / 16))
+  if ((h > uh - 2 * MARGIN)); then h=$((uh - 2 * MARGIN)); w=$((h * 16 / 9)); fi
+  if ((w > uw - 2 * MARGIN)); then w=$((uw - 2 * MARGIN)); h=$((w * 9 / 16)); fi
+  x=$((px + (pw - w) / 2)); y=$((py + (ph - h) / 2))
+  ((x + w > ux + uw - MARGIN)) && x=$((ux + uw - w - MARGIN)); ((x < ux + MARGIN)) && x=$((ux + MARGIN))
+  ((y + h > uy + uh - MARGIN)) && y=$((uy + uh - h - MARGIN)); ((y < uy + MARGIN)) && y=$((uy + MARGIN))
+  addr=$(jq -r .address <<<"$c"); win="address:$addr"
+  [[ $(jq -r .floating <<<"$c") == true ]] ||
+    hypr_dispatch "hl.dsp.window.float({ window = \"$win\", action = \"on\" })" setfloating "$win"
+  [[ $(jq -r .pinned <<<"$c") == true ]] ||
+    hypr_dispatch "hl.dsp.window.pin({ window = \"$win\" })" pin "$win"
+  hypr_dispatch "hl.dsp.window.resize({ window = \"$win\", x = $w, y = $h })" resizewindowpixel "exact $w $h,$win"
+  hypr_dispatch "hl.dsp.window.move({ window = \"$win\", x = $x, y = $y })" movewindowpixel "exact $x $y,$win"
+  hypr_dispatch "hl.dsp.window.alter_zorder({ window = \"$win\", mode = \"top\" })" alterzorder "top,$win"
+  echo over >"$STATE"
+}
+
 # place_new <pid> <socket>: wait for the new player's window. The first player (no other
 # omaraptor / floated web window) opens centred at CENTER_PCT; later ones park in the first free
 # corner (br, bl, tr, tl; cascade if all four are busy). Re-checked once the video is up.
@@ -366,6 +392,7 @@ place_new() {
     sleep 0.1
   done
   [[ -n ${c:-} ]] || return 0
+  if [[ -n $NEW_OVER ]] && place_over "$c" "$NEW_OVER"; then return 0; fi
   addr=$(jq -r .address <<<"$c")
   others=$(hyprctl clients -j | jq -c --arg k "$APP_ID" --arg t "$WEB_TAG" --arg a "$addr" '
     [.[] | select((.class == $k or any(.tags[]?; startswith($t))) and .address != $a) | [.at[0], .at[1], .size[0], .size[1]]]')
@@ -424,14 +451,12 @@ place_new() {
   keep_on_screen "$addr"
 }
 
-# launch_player [url] [clip|prefill:URL]: a brand-new mpv window with its own IPC socket. No url:
-# an empty window that asks for a link (omaraptor-hud.lua prompt; Esc closes it). "clip": the url
-# came from the clipboard (HUD shows PLAYING FROM CLIPBOARD + Esc undo). "prefill:URL": the
-# empty window's link field starts with URL.
+# launch_player [url] [clip]: a brand-new mpv window with its own IPC socket. No url: an empty
+# window that asks for a link (omaraptor-hud.lua home screen; Esc closes it) and keeps its size
+# when the link loads. "clip": the url came from the clipboard (ARMED: FIRE waits).
 launch_player() {
-  local url=$1 how=${2:-} sock="" pid s clip="" prefill=""
+  local url=$1 how=${2:-} sock="" pid s clip=""
   [[ $how == clip ]] && clip=1
-  [[ $how == prefill:* ]] && prefill=${how#prefill:}
   for s in "$RUN_DIR/omaraptor-$UID"-*.sock; do   # drop sockets of windows that already closed
     [[ -e $s ]] || continue
     pid=${s##*-}; pid=${pid%.sock}
@@ -443,10 +468,10 @@ launch_player() {
   fi
   # no other player / floated web window: mark it for the centred Hyprland rule (see CENTER_TITLE)
   local title=
-  hyprctl clients -j 2>/dev/null | jq -e --arg k "$APP_ID" --arg t "$WEB_TAG" \
+  [[ -n $NEW_OVER ]] || hyprctl clients -j 2>/dev/null | jq -e --arg k "$APP_ID" --arg t "$WEB_TAG" \
     'any(.[]; .class == $k or any(.tags[]?; startswith($t)))' >/dev/null 2>&1 || title=$CENTER_TITLE
   # exec keeps the pid, so a pid-named socket can be chosen before mpv starts
-  setsid env OMARAPTOR_CLIPSTART="$clip" OMARAPTOR_PREFILL="$prefill" bash -c 'sock=$1; conf=$2; app=$3; url=$4; title=$7
+  setsid env OMARAPTOR_CLIPSTART="$clip" bash -c 'sock=$1; conf=$2; app=$3; url=$4; title=$7
     [[ -n $sock ]] || sock="$5/omaraptor-$6-$$.sock"
     rm -f "$sock"
     if [[ -n $url ]]; then
@@ -454,7 +479,7 @@ launch_player() {
         --input-ipc-server="$sock" --force-window=immediate ${title:+"--title=$title"} -- "$url"
     fi
     exec mpv --config-dir="$conf" --wayland-app-id="$app" --x11-name="$app" \
-      --input-ipc-server="$sock" --force-window=immediate --idle=yes ${title:+"--title=$title"} \
+      --input-ipc-server="$sock" --force-window=immediate --idle=yes --auto-window-resize=no ${title:+"--title=$title"} \
       --script-opts-append=omaraptor-hud-prompt=yes' \
     omaraptor-launch "$sock" "$CONF_DIR" "$APP_ID" "$url" "$RUN_DIR" "$UID" "$title" </dev/null >/dev/null 2>&1 &
   pid=$!
@@ -481,20 +506,23 @@ clip_link() {
   [[ ${1:-} == any || $host =~ $CLIP_HOSTS ]] || return 1
   printf '%s' "$u"
 }
-clip_key() { printf '%s' "$1" | sha256sum | cut -c1-16; }
-clip_recent() { # clip_recent <url>: true if it was auto-started in the last CLIP_DEDUPE_S seconds
-  local k t
-  [[ -f $CLIP_SEEN ]] && read -r k t < "$CLIP_SEEN" 2>/dev/null || return 1
-  [[ $k == "$(clip_key "$1")" && $t =~ ^[0-9]+$ ]] && (( $(date +%s) - t < CLIP_DEDUPE_S ))
-}
-# start_player [new]: no explicit url. Clipboard video link -> play it now; else the paste field.
+# start_player: no explicit url (SUPER+ALT+Y). Clipboard link -> ARMED with it; else the paste field.
 start_player() {
   local url
-  if [[ ${1:-} == new ]]; then url=$(clip_link) || url=""; else url=$(clip_link any) || url=""; fi
+  url=$(clip_link any) || url=""
   if [[ -z $url ]]; then launch_player ""; return; fi
-  if [[ ${1:-} == new ]] && clip_recent "$url"; then launch_player "" "prefill:$url"; return; fi
-  printf '%s %s\n' "$(clip_key "$url")" "$(date +%s)" > "$CLIP_SEEN" 2>/dev/null || true
   launch_player "$url" clip
+}
+# new_player [pid]: "new" (HUD + button passes its own pid; SUPER+CTRL+ALT+N none): always an
+# EMPTY window, never the clipboard, opened over that player (else the focused / last one).
+new_player() {
+  local c
+  if [[ ${1:-} =~ ^[0-9]+$ ]]; then
+    c=$(hyprctl clients -j 2>/dev/null | jq -cer --argjson p "$1" --arg k "$APP_ID" \
+      'first(.[] | select(.pid == $p and .class == $k)) // empty') && NEW_OVER=$(jq -r .address <<<"$c")
+  fi
+  if [[ -z $NEW_OVER ]]; then resolve_target; NEW_OVER=$TARGET_ADDR; fi
+  launch_player ""
 }
 
 read_url() {
@@ -566,7 +594,7 @@ case ${1:-} in
   size) resolve_target; resize_player "${2:-larger}"; exit 0 ;;
   nudge) resolve_target; nudge_player "${2:-}"; exit 0 ;;
   fullscreen) resolve_target; toggle_fullscreen; exit 0 ;;
-  new) start_player new; exit 0 ;;
+  new) new_player "${2:-}"; exit 0 ;;
   swap)
     url=$(read_url "${2:-}")
     resolve_target

@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.0.2 (2026-10-30)
+
+- ARMED, then FIRE. A copied link (<kbd>Super</kbd>+<kbd>Alt</kbd>+<kbd>Y</kbd> or PASTE LINK) now loads paused in a launch console and waits. Press FIRE (click, <kbd>Enter</kbd> or <kbd>Space</kbd>) for a short countdown, then the picture expands into the HUD. <kbd>Esc</kbd> goes back to the paste screen. A typed link fires by itself.
+- Gauge cluster on the launch console: platform badge, title and chips, SIGNAL and BUFFER bars, and MASTER ARM / SEEKER / RELEASE tiles.
+- The `+` button opens an empty player on the NO SIGNAL / PASTE LINK screen, at 85 % of the player you clicked and centred over it. It no longer starts the copied link by itself.
+- The signal meter keeps showing the real levels while muted, in rust under the MUTED tag.
+- YouTube Mix links (`list=RD...`) play the one video at once instead of resolving the endless mix first. Up next still continues with the mix.
+- The KEY HINTS switch (`T` in the `?` panel) takes effect at once, with a short flash on the `T` key.
+- Hardware decoding now defaults to `hwdec=auto-copy-safe`, which avoids a VA-API crash on Intel (iHD) when a window closes or switches video. To go back, set `hwdec=auto-safe` in `~/.config/omaraptor/mpv.conf`.
+
 ## 1.0.1 (2026-10-30)
 
 - Key hints are now off by default. The key-letter badges over the buttons no longer show on every hover. Turn them on or off with the KEY HINTS [ON | OFF] switch in the `?` panel (click it, or press `T` while the panel is open). The choice is kept across launches in `$XDG_STATE_HOME/omaraptor/key-hints`.
