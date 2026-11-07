@@ -1,0 +1,128 @@
++  local base = os.getenv("XDG_CONFIG_HOME")
++  if not base or base == "" then base = (os.getenv("HOME") or "") .. "/.config" end
++  local path = base .. "/omaraptor/script-opts/omaraptor-hud.conf"
++  local f = io.open(path, "r")
++  local body = f and f:read("*a") or ""
++  if f then f:close() end
++  if body:find("night=") then body = body:gsub("night=[^%s\r\n]*", "night=" .. val, 1)
++  else
++    if body ~= "" and not body:match("\n$") then body = body .. "\n" end
++    body = body .. "night=" .. val .. "\n"
++  end
++  local dir = path:match("^(.*)/")
++  if dir then os.execute(string.format("mkdir -p %q", dir)) end
++  local w = io.open(path, "w")
++  if w then w:write(body); w:close() end
++end
++function hud.night_set(lvl, save)
++  lvl = math.floor(tonumber(lvl) or 0)
++  if lvl < 0 then lvl = 0 elseif lvl > 2 then lvl = 2 end
++  hud.night = lvl
++  hud.night_eq()
++  hud.night_draw()
++  if save ~= false then hud.night_save() end
++  if state.visible then render() end
++  publish()
++end
++function hud.night_cycle()
++  hud.night_set(((hud.night or 0) + 1) % 3, true)
++  show()
++end
++function hud.standby()           -- installer reload: drop this copy so load-script can draw one HUD
++  hud.dead = true
++  if hide_timer then pcall(function() hide_timer:kill() end) end
++  if fade_timer then pcall(function() fade_timer:kill() end) end
++  if tick_timer then pcall(function() tick_timer:kill() end) end
++  pcall(function() ov:remove() end)
++  pcall(function() if hud.veil then hud.veil:remove() end end)
++  pcall(set_section, false)
++  pcall(function() mp.input_disable_section(TIPS_SECTION) end)
++  pcall(function() mp.input_disable_section(hud.NIGHT_SECTION) end)
++  local names = { "pin", "night", "tips", "click", "nop", "spd-up", "spd-down", "tips-click",
++    "tips-close", "tips-keyhints", "video-click", "video-dbl", "arm-click", "arm-cancel",
++    "arm-enter", "hud-mode", "hud-mode-h", "home-paste", "boot-fire", "boot-abort",
++    "card-close", "card-esc", "card-click" }
++  for _, n in ipairs(names) do pcall(function() mp.remove_key_binding(n) end) end
++end
+ 
+ -- window size (runs "omaraptor size ...", throttled so a fast wheel doesn't pile up) -----------
+ local resize_busy, resize_next = false, nil
+@@ -2424,14 +2613,15 @@ local function ulen(str) return select(2, str:gsub("[^\128-\191]", "")) end
+ local KEY_COLS = {
+   { "PLAYBACK", {
+     { "SPACE / K", "play · pause" }, { "← / →", "back / fwd 5 s" }, { "J / L", "back / fwd 10 s" },
+-    { "0 – 9", "jump to 0–90 %" }, { "< / >", "speed − / +" }, { "N  ·  ⇧N", "next · previous" },
++    { "0 – 9", "jump to 0–90 %" }, { "< / >", "speed − / +" }, { "]  ·  ⇧N", "next · previous" },
+     { "R", "repeat on / off" } } },
+   { "SOUND · VIEW", {
+     { "↑ / ↓", "volume ± 5" }, { "M", "mute" }, { "F", "fullscreen" }, { "ESC", "close panel · exit fs" },
+-    { "-  =  S", "smaller · larger · cycle" }, { "C", "subtitles" }, { "I", "link / signal info" } } },
++    { "-  =  S", "smaller · larger · cycle" }, { "C", "subtitles" }, { "I", "link / signal info" },
++    { "N", "night off · dim · dimmer" } } },
+   { "COCKPIT", {
+     { "H", "arm panel (CRUISE ↔ COMBAT)" }, { "ENTER", "throw switch (in panel)" },
+-    { "O", "new window · paste link" }, { "P", "pin frame + bar" }, { "?", "this panel" }, { "Q", "quit" },
++    { "O", "new window · paste link" }, { "P", "pin on every workspace" }, { "?", "this panel" }, { "Q", "quit" },
+     { "T", "key hints on / off (here)" } } },
+ }
+ local KEY_FOOT = "click  play · pause   ·   double-click  fullscreen   ·   drag  move   ·   wheel  volume"
+@@ -2635,6 +2825,7 @@ local actions = {
+   help    = function() toggle_tips(); return nil end,
+   hud     = function() if arm_toggle then arm_toggle() end; return nil end,
+   pin     = function() hud.toggle_pin(); return nil end,
++  night   = function() hud.night_cycle(); return nil end,
+   fs      = function() mp.commandv("cycle", "fullscreen"); return nil end,
+   new     = function()   -- another, EMPTY omaraptor window, opened over this one (our pid)
+     mp.command_native_async({ name = "subprocess", args = { OMARAPTOR, "new", tostring(mp.get_property_number("pid", 0)) }, playback_only = false,
+@@ -2774,6 +2965,10 @@ mp.input_define_section(HELP_SECTION,
+   "MBTN_LEFT script-binding " .. me .. "/click\n" ..
+   "MBTN_LEFT_DBL script-binding " .. me .. "/nop\n" ..
+   "MBTN_RIGHT script-binding " .. me .. "/nop\n", "force")
++mp.input_define_section(hud.NIGHT_SECTION,
++  "MBTN_LEFT script-binding " .. me .. "/click\n" ..
++  "MBTN_LEFT_DBL script-binding " .. me .. "/nop\n" ..
++  "MBTN_RIGHT script-binding " .. me .. "/nop\n", "force")
+ mp.add_key_binding(nil, "tips-click", tips_click, { complex = true })
+ mp.add_key_binding(nil, "tips-close", close_tips)
+ mp.add_key_binding(nil, "tips-keyhints", function() tips.keyhints_toggle() end)
+@@ -2791,6 +2986,7 @@ mp.input_define_section(TIPS_SECTION,
+ mp.add_key_binding("?", "tips", toggle_tips)
+ mp.register_event("file-loaded", function() if hud.pin and not state.boot then show() end end)
+ mp.add_key_binding("p", "pin", function() if hud.card_off then hud.card_off() end; hud.toggle_pin() end)   -- (overrides mpv's default p = pause; Space still pauses)
++mp.add_key_binding("n", "night", function() if hud.card_off then hud.card_off() end; hud.night_cycle() end)
+ mp.register_script_message("pin", function(v)   -- IPC: pin yes / no / (toggle)
+   if v == "yes" or v == "on" then hud.toggle_pin(true) elseif v == "no" or v == "off" then hud.toggle_pin(false) else hud.toggle_pin() end
+ end)
+@@ -4248,7 +4444,7 @@ do
+   card.FILE = card.DIR .. "/first-launch-seen"
+   card.ROWS = {
+     { "SPACE / K", "play · pause" }, { "← →  /  J L", "5 s  /  10 s" }, { "↑ ↓   M", "volume · mute" },
+-    { "0 – 9", "jump to 0–90 %" }, { "<  >", "speed" }, { "N", "next video" },
++    { "0 – 9", "jump to 0–90 %" }, { "<  >", "speed" }, { "N", "night off · dim · dimmer" }, { "]", "next video" },
+     { "F   ESC", "fullscreen · exit" }, { "H", "arm panel" }, { "?", "all keys" },
+   }
+   function card.draw()
+@@ -4410,6 +4606,14 @@ mp.register_script_message("omaraptor-hud", function(cmd, arg)
+     if arg == "" then status.until_t = 0 else set_status(arg, 30) end; render()
+   elseif cmd == "prompt" then
+     if not prompt.open then open_prompt("") end
++  elseif cmd == "standby" then
++    hud.standby()
++  elseif cmd == "night" then
++    local keep = os.getenv("OMR_NIGHT_NOSAVE") ~= "1"
++    if arg == "off" or arg == "0" then hud.night_set(0, keep)
++    elseif arg == "dim" or arg == "1" then hud.night_set(1, keep)
++    elseif arg == "dimmer" or arg == "2" then hud.night_set(2, keep)
++    else hud.night_cycle() end
+   elseif cmd == "prompt-paste" then   -- same path as a real paste (used for testing)
+     if prompt.open and not on_pasted(arg) then
+       prompt.reopen = arg or ""; prompt.reopen_msg = "That isn't a web link. Copy a YouTube URL and paste it."
+@@ -4419,3 +4623,8 @@ mp.register_script_message("omaraptor-hud", function(cmd, arg)
+ end)
+ 
+ publish()
++mp.set_property("user-data/omaraptor-hud-api", "1")
++hud.night_eq()
++hud.night_draw()
++mp.observe_property("osd-dimensions", "native", function() if not hud.dead then hud.night_draw() end end)
++if hud.pin then mp.add_timeout(0.4, function() if not hud.dead then hud.apply_wpin(true); show() end end) end
