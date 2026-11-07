@@ -1,0 +1,440 @@
+      tr.x + tr.w - math.floor(fs * 4.0), y0 - math.floor(fs * 0.75)) end)            -- square ON AIR lamp
+    mtext(ass, tr.x + tr.w, y0 - math.floor(fs * 1.0), math.floor(fs * 0.85), LC, 0x00, paused and "HOLD" or "LIVE", 6, "\\fsp3")
+    local ld = remfx.live_dur
+    local foot, boxt
+    if ld and ld > 0 then                                              -- DVR stream: box = behind the live edge
+      boxt = tms(math.max(0, ld - abs), math.floor(fs * 1.15), 0x50, "-")
+      foot = "WATCH " .. dtime(cur)
+    else                                                               -- no DVR: box = watch time
+      boxt = tms(cur, math.floor(fs * 1.15), 0x50, "+")
+      foot = string.format("BUF %02ds", math.floor(mp.get_property_number("demuxer-cache-duration") or 0))
+    end
+    mtext(ass, tr.x + tr.w, y1 + math.floor(fs * 1.1), lf, "FFFFFF", 0x60, foot, 6, "\\fsp2")
+    ptr_box(ass, bx - 2, ny, -1, boxt, math.floor(fs * 1.15), LC,
+      math.floor(fs * 6.6), math.floor(fs * 1.6), thot and "hot" or nil)
+  elseif tr then
+    local bx = tr.x
+    local y1, y0 = tr.y + tr.h, tr.y
+    local function ry_(rem) return math.floor(y1 - math.max(0, math.min(1, rem / dur)) * tr.h) end
+    local thot = state.hot == "ttape" or state.vdrag == "ttape"
+    local cur = (state.vdrag == "ttape" and state.seek_tgt) or remfx.cur(pos)
+    local rem = math.max(0, dur - cur)
+    local _, cd = remfx.state(pos, dur)
+    local RC, RS = cd.vcol or ACCENT, cd.scol or cd.vcol or ACCENT   -- RC breathes, RS steady
+    if thot and tr.grab then
+      local gr = tr.grab
+      shape(ass, ACCENT, 0x70, function(d) outline(d, gr.x, gr.y, gr.w, gr.h, 1) end)
+      shape(ass, ACCENT, 0x10, function(d) ticks(d, gr.x, gr.y, gr.w, gr.h, 2, math.floor(fs * 0.8)) end)
+    end
+    shape(ass, INK, 0x90, function(d) d:rect_cw(bx, y0 - math.floor(fs * 1.7), tr.x + tr.w + math.floor(lf * 0.6), y1 + math.floor(fs * 1.8)) end)
+    shape(ass, thot and ACCENT or "FFFFFF", thot and 0x00 or 0x90, function(d) d:rect_cw(bx, y0, bx + (thot and 2 or 1), y1) end)
+    local NICE = { 5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600, 7200, 18000 }
+    local sd = tr.h > 0 and scale.dur(dur)
+    local M = sd and scale.major(NICE, function(v) return (dur / v) * fs * 2.4 <= tr.h end, dur * fs * 2.4 / tr.h)
+    local marks = M and scale.cached("rem", string.format("%.17g|%.17g|%.17g|%.17g|%.17g|%.17g", dur, tr.y, tr.w, tr.h, fs, lf), function()
+      local o, sub = {}, M / 2                         -- { y, len, r, label or nil }
+      if dur / sub > scale.TICK_MAX then return o end
+      for r = 0, dur, sub do
+        local isM = (r / M) == math.floor(r / M)
+        o[#o + 1] = { ry_(r), isM and math.floor(tr.w * 0.5) or math.floor(tr.w * 0.25), r,
+          isM and (r == 0 and "T-0" or lbl_t(r, long)) or nil }
+      end
+      return o
+    end) or {}
+    local nleft, ngone = 0, 0                          -- marks still ahead (<= rem) / already flown (> rem)
+    for _, k in ipairs(marks) do
+      if k[3] <= rem then nleft = nleft + 1 else ngone = ngone + 1 end
+      if k[4] then mtext(ass, bx + math.floor(tr.w * 0.6), k[1], lf, k[3] <= rem and RS or "FFFFFF", k[3] <= rem and 0x10 or 0x70, k[4], 4, "\\fsp0") end
+    end
+    if ngone > 0 then shape(ass, "FFFFFF", 0xA0, function(d) for _, k in ipairs(marks) do if k[3] > rem then d:rect_cw(bx, k[1], bx + k[2], k[1] + 2) end end end) end
+    if nleft > 0 then shape(ass, RS, 0x20, function(d) for _, k in ipairs(marks) do if k[3] <= rem then d:rect_cw(bx, k[1], bx + k[2], k[1] + 2) end end end) end
+    shape(ass, RS, 0x00, function(d) d:rect_cw(bx, ry_(rem), bx + 4, y1) end)          -- remaining "fuel" bar
+    mtext(ass, tr.x + tr.w, y0 - math.floor(fs * 1.0), math.floor(fs * 0.85), RC, 0x00, "REM T-", 6, "\\fsp3")
+    mtext(ass, tr.x + tr.w, y1 + math.floor(fs * 1.1), lf, "FFFFFF", 0x60, "DUR " .. dtime(dur), 6, "\\fsp2")
+    local pbh = math.floor(fs * 1.6)
+    if thot and not state.vdrag and state.my and math.abs(state.my - ry_(rem)) > pbh * 0.6 then
+      local gy = math.max(y0, math.min(y1, state.my))
+      local grem = clamp01((y1 - gy) / tr.h) * dur
+      shape(ass, ACCENT, 0x50, function(d) d:rect_cw(bx, gy - 1, tr.x + tr.w, gy + 1) end)
+      ptr_box(ass, bx - 2, gy, -1, (tms(grem, math.floor(fs * 1.0), 0x50, "T-")), math.floor(fs * 1.0), ACCENT,
+        math.floor(fs * 6.6), math.floor(fs * 1.3), "ghost")
+    end
+    ptr_box(ass, bx - 2, ry_(rem), -1, (tms(rem, math.floor(fs * 1.15), 0x50, "T-")), math.floor(fs * 1.15), RC,
+      math.floor(fs * 6.6), pbh, thot and "hot" or nil)
+  end
+end
+local function draw_fpm(ass, w, h, u, FS)        -- targeting scope: play / pause acknowledgement
+  if idle_empty_now() then return end               -- no scope on the empty window
+  local paused = mp.get_property_bool("pause")
+  local e = fpm.freeze or (mp.get_time() - fpm.t)   -- (freeze: preview hook for screenshots)
+  local HOLD, FADE = 2.0, 0.6
+  if not paused and e > HOLD + FADE then return end
+  if paused and not fpm.paused then return end      -- (pause flash not armed yet: nothing)
+  -- PAUSED: 2 crisp crosshair blinks (150 ms on / off), then the WHOLE scope group (brackets, cross,
+  -- rings, pips, labels) eases to ~56 % opacity over 0.3 s and holds steady until play; no pause
+  -- timer after that (the 2.7 s flash timer covers it). PLAY: unchanged full brightness + fade.
+  local BL, NB = 0.15, 2
+  local BLINK, DIM = 2 * BL * NB, 0x70
+  local al
+  if paused then al = e <= BLINK and 0 or math.floor(DIM * math.min(1, (e - BLINK) / 0.3))
+  elseif e <= HOLD then al = 0
+  else al = math.floor(255 * math.min(1, (e - HOLD) / FADE)) end
+  local function A(x)
+    if paused then return math.floor(255 - (255 - math.min(255, x)) * (255 - al) / 255) end   -- scale opacity
+    return math.min(255, al + x)
+  end
+  local function SA(x) return math.floor(255 - (255 - x) * (255 - al) / 255) end   -- shadow: fades with the scope
+  local cx, cy = math.floor(w / 2), math.floor(h / 2)
+  local S = math.floor(h * (FS and 0.19 or 0.21))   -- FS: 83 % of the old 0.23 (Nik: a bit smaller, still bold)
+  local T = math.max(3, math.floor(S * 0.022))
+  local k = math.min(1, e / 0.2); k = 1 - (1 - k) ^ 3            -- 200 ms snap-in (ease-out)
+  local R = math.floor(S / 2 * (1 + 0.7 * (1 - k)))
+  local L = math.floor(S * 0.22)
+  local function sh(col, alpha, blur, fn)
+    ass:new_event()
+    ass:append(string.format("{\\an7\\pos(0,0)\\shad0\\bord0\\blur%d\\1c&H%s&\\1a&H%02X&}", blur, col, math.min(255, alpha)))
+    ass:draw_start(); fn(ass); ass:draw_stop()
+  end
+  local function geom(d)
+    local t = math.floor(T * 1.4)
+    for _, c in ipairs({ { -1, -1 }, { 1, -1 }, { -1, 1 }, { 1, 1 } }) do          -- lock brackets
+      local x, y = cx + c[1] * R, cy + c[2] * R
+      local xa, xb = math.min(x, x - c[1] * L), math.max(x, x - c[1] * L)
+      local ya, yb = math.min(y, y - c[2] * L), math.max(y, y - c[2] * L)
+      d:rect_cw(xa, math.min(y, y - c[2] * t), xb, math.max(y, y - c[2] * t))
+      d:rect_cw(math.min(x, x - c[1] * t), ya, math.max(x, x - c[1] * t), yb)
+    end
+  end
+  local function cross(d)                                                     -- crosshair with gaps + square dot
+    local g0, g1 = math.floor(S * 0.11), math.floor(S * 0.42)
+    d:rect_cw(cx - g1, cy - T / 2, cx - g0, cy + T / 2); d:rect_cw(cx + g0, cy - T / 2, cx + g1, cy + T / 2)
+    d:rect_cw(cx - T / 2, cy - g1, cx + T / 2, cy - g0); d:rect_cw(cx - T / 2, cy + g0, cx + T / 2, cy + g1)
+    for i = 1, 5 do                                                           -- tick marks on the arms (same state colour)
+      local o = math.floor(S * (0.11 + i * 0.06))
+      local len = (i % 2 == 0) and math.floor(S * 0.05) or math.floor(S * 0.028)
+      local tt = math.max(2, math.floor(T * 0.6))
+      d:rect_cw(cx - o, cy + T / 2, cx - o + tt, cy + T / 2 + len); d:rect_cw(cx + o - tt, cy + T / 2, cx + o, cy + T / 2 + len)
+      d:rect_cw(cx + T / 2, cy - o, cx + T / 2 + len, cy - o + tt); d:rect_cw(cx + T / 2, cy + o - tt, cx + T / 2 + len, cy + o)
+    end
+    local q = math.max(2, math.floor(S * 0.022))
+    d:rect_cw(cx - q, cy - q, cx + q, cy + q)
+  end
+  -- lock-on rings OUTSIDE the brackets: 1 solid + 2 broken. PLAY: contract + counter-rotate, snap red at lock
+  local LOCK = 0.6
+  local kk = paused and 1 or math.min(1, e / LOCK); kk = 1 - (1 - kk) ^ 3
+  local locked = paused or e >= LOCK
+  local sc = 1 + 0.5 * (1 - kk)
+  local lw = math.max(1, S * 0.008)
+  local Rs, R1, R2 = S * 0.80 * sc, S * 0.87 * sc, S * 0.93 * sc
+  local rot1, rot2 = 140 * (1 - kk), -100 * (1 - kk)
+  local rc = (not paused and locked) and ALERT or ACCENT        -- lock = red, like the cross
+  local snap = (not paused and e >= LOCK and e < LOCK + 0.18) and 1 or 0
+  local ra = paused and 0x50 or (locked and 0x10 or 0x50)        -- hold: dim, visible
+  -- soft drop shadow: ONE dark blurred underlay for brackets + cross + rings, so the scope
+  -- separates from bright sky / cloud; at ~25 % ink it is invisible on dark footage
+  ass:new_event()
+  ass:append(string.format("{\\an7\\pos(0,%d)\\shad0\\bord%d\\blur%d\\1c&H000000&\\3c&H000000&\\1a&H%02X&\\3a&H%02X&}",
+    math.max(1, math.floor(T / 2)), math.max(2, math.floor(T * 0.8)), math.max(4, math.floor(S * 0.035)), SA(0x98), SA(0x98)))
+  ass:draw_start()
+  geom(ass)
+  if not (paused and e < BLINK and math.floor(e / BL) % 2 == 1) then cross(ass) end   -- blink-off: no cross shadow
+  arc(ass, cx, cy, Rs - lw, Rs, 0, 360)
+  for i = 0, 2 do arc(ass, cx, cy, R1 - lw * 1.6, R1, rot1 + i * 120 + 10, rot1 + i * 120 + 110) end
+  if S >= 100 then for i = 0, 7 do arc(ass, cx, cy, R2 - lw, R2, rot2 + i * 45 + 12, rot2 + i * 45 + 33) end end
+  ass:draw_stop()
+  -- crosshair colour state: PAUSED = amber (2 blinks, then dims with the group); PLAY = red
+  local xc, xa = ALERT, 0
+  if paused then
+    xc = AMBER
+    if e < BLINK and math.floor(e / BL) % 2 == 1 then xa = 0xFF end           -- blink "off" phase
+  end
+  local gb = math.max(4, math.floor(S * 0.03))
+  sh(ACCENT, A(0x70), gb, geom)                                               -- jade glow (brackets, ticks)
+  sh(ACCENT, A(0x00), 0, geom)                                                -- jade core strokes
+  local function XA(x) return x >= 0xFF and 0xFF or A(x) end                  -- blink off = hidden
+  sh(xc, XA(xa >= 0xFF and 0xFF or 0x60 + xa / 2), gb, cross)                -- crosshair glow (off with the core)
+  sh(xc, XA(xa), 0, cross)                                                    -- crosshair + dot core
+  sh(ACCENT, A(paused and 0x50 or 0x60), 0, function(d) arc(d, cx, cy, Rs - lw, Rs, 0, 360) end)   -- solid ring
+  sh(rc, A(ra - snap * 0x10), 0, function(d)                     -- broken ring 1: three 100 deg arcs
+    for i = 0, 2 do arc(d, cx, cy, R1 - lw * (1.6 + snap), R1, rot1 + i * 120 + 10, rot1 + i * 120 + 110) end
+  end)
+  if S >= 100 then
+    sh(rc, A(ra + 0x20), 0, function(d)                          -- broken ring 2: eight short dashes
+      for i = 0, 7 do arc(d, cx, cy, R2 - lw, R2, rot2 + i * 45 + 12, rot2 + i * 45 + 33) end
+    end)
+  end
+  local pc = paused and AMBER or rc                              -- cardinal lock pips: amber on HOLD (blink), red on lock
+  local pa = paused and XA(xa + 0x10) or A(locked and 0x00 or 0x60)
+  sh(pc, pa, 0, function(d)
+    local pl, pw = S * 0.045, math.max(2, S * 0.022)
+    for i = 0, 2 do
+      local deg = i * 120 + rot1
+      local ox, oy = ang(cx, cy, R1 + lw, deg); local ix, iy = ang(cx, cy, R1 - pl, deg)
+      local t = math.rad(deg); local nx, ny = math.cos(t) * pw, math.sin(t) * pw
+      d:move_to(ox - nx, oy - ny); d:line_to(ox + nx, oy + ny); d:line_to(ix, iy)
+    end
+  end)
+  local big = math.floor(S * 0.17)
+  local small = math.floor(S * 0.075)
+  local word = paused and "HOLD" or "PLAY"
+  local ly = cy + R + math.floor(S * 0.06)
+  ass:new_event()
+  ass:append(string.format("{\\an8\\pos(%d,%d)\\fn%s\\fs%d\\fsp%d\\bord%d\\blur%d\\shad%d\\4c&H000000&\\4a&H%02X&\\3c&H%s&\\3a&H%02X&\\1c&HFFFFFF&\\1a&H%02X&}%s",
+    cx, ly, MONO, big, math.floor(big * 0.25), math.max(2, math.floor(big * 0.06)), math.max(3, math.floor(big * 0.12)),
+    math.max(1, math.floor(big * 0.05)), SA(0x90), ACCENT, A(0x40), A(0x00), word))
+  local rem = math.max(0, (mp.get_property_number("duration") or 0) - (remfx.cur(mp.get_property_number("time-pos")) or 0))
+  local ti = math.floor(rem)
+  local data = string.format("T-%02d:%02d", math.floor(ti / 60), ti % 60)
+  local dy = cy - R - math.floor(S * 0.05)
+  local tsh = string.format("\\bord%d\\blur%d\\3c&H000000&\\3a&H%02X&", math.max(1, math.floor(small * 0.12)), math.max(2, math.floor(small * 0.2)), SA(0x88))
+  mtext(ass, cx - R, dy, small, ACCENT, A(0x00), data, 1, "\\fsp2" .. tsh)
+  mtext(ass, cx + R, dy, small, ACCENT, A(0x00), (k < 1 or not locked) and "ACQ" or (paused and "LOCK · PAUSED" or "LOCK"), 3, "\\fsp3" .. tsh)
+end
+-- machined instrument box: dark plate, hairline + inner groove, corner brackets in col
+local function ibox(ass, r, hot, col)
+  shape(ass, INK, 0x40, function(d) d:rect_cw(r.x, r.y, r.x + r.w, r.y + r.h) end)
+  shape(ass, "FFFFFF", hot and 0x30 or 0x70, function(d) outline(d, r.x, r.y, r.w, r.h, 1) end)
+  shape(ass, "FFFFFF", 0xD8, function(d) outline(d, r.x + 3, r.y + 3, r.w - 6, r.h - 6, 1) end)
+  if hot then shape(ass, ACCENT, 0xE8, function(d) d:rect_cw(r.x, r.y, r.x + r.w, r.y + r.h) end) end
+  shape(ass, col, 0x00, function(d)
+    local l, t = math.max(5, math.floor(r.h * 0.16)), 2
+    local x0, y0, x1, y1 = r.x, r.y, r.x + r.w, r.y + r.h
+    d:rect_cw(x0, y0, x0 + l, y0 + t); d:rect_cw(x0, y0, x0 + t, y0 + l)
+    d:rect_cw(x1 - l, y0, x1, y0 + t); d:rect_cw(x1 - t, y0, x1, y0 + l)
+    d:rect_cw(x0, y1 - t, x0 + l, y1); d:rect_cw(x0, y1 - l, x0 + t, y1)
+    d:rect_cw(x1 - l, y1 - t, x1, y1); d:rect_cw(x1 - t, y1 - l, x1, y1)
+  end)
+end
+
+-- live signal meter (the f22 MUTE softkey face): 3 rows (L peak, R peak, RMS mix), 16 square
+-- cells, -40 .. 0 dBFS, top 2 cells red, falling peak-hold cell; muted = same live levels in rust + MUTED tag
+local function draw_meter(ass, p, er, muted)
+  local N, gp = 16, math.max(1, math.floor(er.w / 60))
+  if er.big then N = math.max(16, math.min(40, math.floor(er.w / 9))); gp = math.max(2, math.floor(er.w / 140)) end
+  local rg = math.max(2, math.floor(er.h * 0.12))
+  local ch = math.floor((er.h - 2 * rg) / 3)
+  local cw = math.floor((er.w - (N - 1) * gp) / N)
+  local x0 = er.x + math.floor((er.w - (N * cw + (N - 1) * gp)) / 2)
+  local function cells(db) return math.max(0, math.min(N, math.floor((db + 40) / 40 * N + 0.5))) end
+  local function cx(i) return x0 + (i - 1) * (cw + gp) end
+  local RED = er.big and math.max(2, math.floor(N * 0.1 + 0.5)) or 2   -- top ~4 dB red
+  if er.big then
+    local lf2 = math.max(er.big and 13 or 8, math.floor(p.fs * 0.62))
+    local nm = { "L", "R", "Σ" }
+    for k = 1, 3 do
+      mtext(ass, er.lx + math.floor(lf2 * 0.2), er.y + (k - 1) * (ch + rg) + ch / 2, lf2, muted and RUST or "FFFFFF",
+        muted and 0x40 or 0x70, nm[k], 4)
+    end
+    local yb = er.y + er.h + 2                      -- dB scale notches: -40 -30 -20 -10 -6 -3 0
+    local mk = {}
+    for _, db in ipairs({ -40, -30, -20, -10, -6, -3, 0 }) do mk[#mk + 1] = { cx(math.max(1, cells(db))) + (db == -40 and 0 or cw), db } end
+    shape(ass, "FFFFFF", 0x80, function(d) for _, m in ipairs(mk) do d:rect_cw(m[1], yb, m[1] + 1, yb + (m[2] % 10 == 0 and 4 or 2)) end end)
+    local cf = math.max(7, math.floor(p.fs * 0.56))
+    for _, db in ipairs({ -20, -10, 0 }) do
+      local x = cx(math.max(1, cells(db))) + (db == -40 and 0 or cw)
+      mtext(ass, x, yb + 4, cf, db == 0 and ALERT or "FFFFFF", db == 0 and 0x30 or 0x80, tostring(db), db == -40 and 7 or (db == 0 and 9 or 8))
+    end
+    mtext(ass, er.lx, er.y + er.h + er.cap, math.floor(p.fs * 0.66), muted and RUST or "FFFFFF", muted and 0x00 or 0x50,
+      "MUTE", 1, "\\fsp2")
+  end
+  for k = 1, 3 do
+    local y = er.y + (k - 1) * (ch + rg)
+    local lit, pkc = cells(eq.lv[k]), cells(eq.pk[k])   -- muted: still the real signal (astats sits before mpv's mute)
+    shape(ass, "FFFFFF", 0xC8, function(d)          -- unlit cells: same dim grey, so rust levels read when muted
+      for i = lit + 1, N do if i ~= pkc then d:rect_cw(cx(i), y, cx(i) + cw, y + ch) end end
+    end)
+    if lit > 0 and muted then
+      shape(ass, RUST, 0x00, function(d) for i = 1, lit do d:rect_cw(cx(i), y, cx(i) + cw, y + ch) end end)
+    elseif lit > 0 then
+      shape(ass, ACCENT, 0x00, function(d) for i = 1, math.min(lit, N - RED) do d:rect_cw(cx(i), y, cx(i) + cw, y + ch) end end)
+      if lit > N - RED then
+        shape(ass, ALERT, 0x00, function(d) for i = N - RED + 1, lit do d:rect_cw(cx(i), y, cx(i) + cw, y + ch) end end)
+      end
+    end
+    if pkc > lit and pkc > 0 then
+      shape(ass, muted and RUST or (pkc > N - RED and ALERT or ACCENT), 0x00, function(d) d:rect_cw(cx(pkc), y, cx(pkc) + cw, y + ch) end)
+    end
+  end
+  if er.tile then                                 -- corner brackets: same machined family as the other boxes
+    local r, col = er.tile, muted and RUST or ACCENT
+    shape(ass, col, 0x00, function(d)
+      local l, t = math.max(5, math.floor(r.h * 0.16)), 2
+      local x0, y0, x1, y1 = r.x, r.y, r.x + r.w, r.y + r.h
+      d:rect_cw(x0, y0, x0 + l, y0 + t); d:rect_cw(x0, y0, x0 + t, y0 + l)
+      d:rect_cw(x1 - l, y0, x1, y0 + t); d:rect_cw(x1 - t, y0, x1, y0 + l)
+      d:rect_cw(x0, y1 - t, x0 + l, y1); d:rect_cw(x0, y1 - l, x0 + t, y1)
+      d:rect_cw(x1 - l, y1 - t, x1, y1); d:rect_cw(x1 - t, y1 - l, x1, y1)
+    end)
+  end
+  if muted then                                   -- MUTED tag over the rust cells
+    local tf = math.max(8, math.floor(p.fs * 0.66))
+    local tw, th = math.floor(5 * tf * 0.62 + tf * 1.0), math.floor(tf * 1.3)
+    local tx, ty = math.floor(er.x + er.w / 2 - tw / 2), math.floor(er.y + er.h / 2 - th / 2)
+    shape(ass, INK, 0x00, function(d) d:rect_cw(tx, ty, tx + tw, ty + th) end)
+    shape(ass, RUST, 0x00, function(d) outline(d, tx, ty, tw, th, 1) end)
+    mtext(ass, tx + tw / 2, ty + th / 2, tf, RUST, 0x00, "MUTED", 5, "\\b1\\fsp1")
+  end
+end
+
+local function draw_f22(ass, p, b, w, h, pos, dur, st)
+  local fs, lf = p.fs, p.lf or math.floor(p.fs * 0.7)
+  -- top HUD strip: soft dark band, hairline with brackets, title ticker, data line
+  local nv = p.nav
+  if nv then
+    local yb = nv.dy + math.floor(fs * 0.9)
+    for i = 0, 11 do
+      local ya, yb2 = math.floor(yb * i / 12), math.floor(yb * (i + 1) / 12)
+      shape(ass, INK, 0x28 + math.floor(0xD7 * ((i + 1) / 12) ^ 1.6), function(d) d:rect_cw(0, ya, w, yb2) end)
+    end
+    shape(ass, "FFFFFF", 0xC0, function(d) d:rect_cw(nv.x0, nv.y0 + nv.h, nv.x1, nv.y0 + nv.h + 1) end)
+    shape(ass, ACCENT, 0x40, function(d)
+      d:rect_cw(nv.x0, nv.y0 + nv.h - 5, nv.x0 + 1, nv.y0 + nv.h + 1); d:rect_cw(nv.x1 - 1, nv.y0 + nv.h - 5, nv.x1, nv.y0 + nv.h + 1)
+    end)
+    -- quiet info line: muted amber labels, brighter amber values, faint amber glow (same events)
+    if not hud.light and boot_ok(2) then           -- LIGHT: no info line
+    local function kv(k, v) return C(INFO_LBL, 0x18) .. k .. " " .. C(INFO_VAL, 0x00) .. v .. "   " end
+    local vh = mp.get_property_number("video-params/h")
+    local fps = mp.get_property_number("container-fps") or mp.get_property_number("estimated-vf-fps")
+    local codec = (mp.get_property("video-format") or "--"):upper()
+    local line = kv("CH", channel()) .. kv("RES", vh and (vh .. "P") or "--") ..
+      kv("FPS", fps and string.format("%d", math.floor(fps + 0.5)) or "--") .. kv("CODEC", codec)
+    mtext(ass, nv.x0, nv.dy, math.floor(fs * 0.8), INFO_VAL, 0x00, line, 4, info_glow(fs))
+    mtext(ass, nv.x1, nv.dy, math.floor(fs * 0.8), INFO_VAL, 0x00, C(INFO_LBL, 0x18) .. "LCL " .. C(INFO_VAL, 0x00) .. os.date("%H:%M"), 6, info_glow(fs))
+    end
+  end
+  if not hud.light then                            -- LIGHT: no tapes, no scope / crosshair / rings
+    if p.FS and boot_ok(3) then draw_fs(ass, p, b, w, h, mp.get_property_number("time-pos"), mp.get_property_number("duration")) end
+    if boot_ok(4) then draw_fpm(ass, w, h, p.u, p.FS) end
+  end
+  local nb, hb = b.new, b.help
+  mtext(ass, nb.x + nb.w / 2, nv and nv.dy or nb.y + nb.h + fs, math.floor(lf * 0.95), INFO_LBL, 0x18, "NEW", 5, info_glow(fs, 2))
+  mtext(ass, hb.x + hb.w / 2, nv and nv.dy or hb.y + hb.h + fs, math.floor(lf * 0.95), INFO_LBL, 0x18, "HELP", 5, info_glow(fs, 2))
+  if not b.seek then return end
+  -- readout row: ELAPSED box | status | REMAIN box (airspeed / altitude style boxes with pointers)
+  local ry = p.y + math.floor(p.u * 0.32 + fs * 0.95)
+  local bf = math.floor(fs * 1.12)
+  local function rbox(x, an, label, val, ptr, vcol, ocol, othick, lcol, vlen)
+    local tw = math.floor((vlen or #val) * bf * 0.6 + #label * lf * 0.62 + lf * 1.8)
+    local bh = math.floor(bf * 1.45)
+    local x0 = an == 4 and x or x - tw
+    shape(ass, INK, 0x50, function(d) d:rect_cw(x0, ry - bh / 2, x0 + tw, ry + bh / 2) end)
+    shape(ass, ocol or "FFFFFF", ocol and 0x00 or 0x60, function(d) outline(d, x0, math.floor(ry - bh / 2), tw, bh, othick or 1) end)
+    local k = math.floor(bh * 0.22)                 -- pointer notch toward the tape centre
+    shape(ass, ocol or ACCENT, 0x00, function(d)
+      if ptr > 0 then tri(d, x0 + tw + 1, ry - k, x0 + tw + 1, ry + k, x0 + tw + 1 + k, ry)
+      else tri(d, x0 - 1, ry - k, x0 - 1, ry + k, x0 - 1 - k, ry) end
+    end)
+    mtext(ass, x0 + math.floor(lf * 0.6), ry, lf, lcol or "FFFFFF", lcol and 0x20 or 0x70, label, 4, "\\fsp2")
+    mtext(ass, x0 + tw - math.floor(lf * 0.6), ry, bf, vcol or "FFFFFF", 0x00, val, 6, "\\fsp1")
+    return x0, tw
+  end
+  -- ELP: calm count-up, steady jade HH:MM:SS (whole seconds only, no motion)
+  local function whole(t, pre)                          -- LIGHT: whole seconds only (no 25 Hz digits)
+    local i = math.max(0, math.floor(t or 0))
+    return (pre or "") .. (i >= 3600 and string.format("%d:%02d:%02d", math.floor(i / 3600), math.floor(i / 60) % 60, i % 60)
+      or string.format("%02d:%02d", math.floor(i / 60), i % 60))
+  end
+  local et, el
+  if hud.light then et = whole(pos); el = #et
+  else et, el = tms(remfx.cur(pos), bf, 0x60) end        -- 07:59.482, ms smaller + dimmer
+  local ebx, ebw = rbox(p.cx0, 4, "ELP", et, 1, ACCENT, nil, nil, ACCENT, el)
+  if not hud.light and boot_ok(3) then  -- HDG 127° · 35 %: the run as a heading (matches the compass row on the tape) + percent
+    local fr = (pos and dur and dur > 0) and math.max(0, math.min(1, pos / dur)) or 0
+    local hf = math.floor(bf * 0.82)
+    local hx = ebx + ebw + math.floor(lf * 1.6)
+    local cw1, cw2 = lf * 0.62, hf * 0.6
+    local need = 4 * cw1 + 4 * cw2 + 6 * cw1 + lf
+    local stw = (#(st or "PLAYING") + 2) * fs * 0.9 * 0.62
+    if hx + need < (p.cx0 + p.cx1) / 2 - stw / 2 - lf then
+      mtext(ass, hx, ry, lf, "FFFFFF", 0x70, "HDG", 4, "\\fsp2")
+      hx = hx + math.floor(4 * cw1 + lf * 0.3)
+      mtext(ass, hx, ry, hf, ACCENT, 0x00, string.format("%03d°", math.floor(fr * 360 + 0.5)), 4, "\\fsp1")
+      hx = hx + math.floor(4 * cw2 + lf * 0.8)
+      mtext(ass, hx, ry, lf, "FFFFFF", 0x50, string.format("%3d%%", math.floor(fr * 100)), 4, "\\fsp1")
+    end
+  end
+  -- REM: military countdown T-MM:SS.mmm, colour by remaining fraction, flashes red at the end
+  local rem, cd = remfx.state(pos, dur)
+  local LIVE = is_live()
+  local x0, rw0
+  if LIVE then                                             -- live stream: no countdown, no NEXT tag
+    local blink = mp.get_property_bool("pause") and AMBER or ALERT
+    x0, rw0 = rbox(p.cx1, 6, "SIG", "● LIVE", -1, blink, blink, 2, ACCENT, 6)
+    cd.frm = nil
+  else
+    local rt, rl
+    if hud.light then rt = whole(cd.rem, "T-"); rl = #rt
+    else rt, rl = tms(cd.rem, bf, nil, "T-") end           -- ms smaller, same colour, running fast
+    x0, rw0 = rbox(p.cx1, 6, cd.label, rt, -1, cd.vcol, cd.ocol, cd.othick, cd.vcol, rl)
+  end
+  p.remx, p.remy = x0 + rw0, ry - math.floor(bf * 1.45) / 2   -- the seek key hint sits just above it
+  -- NEXT card: in the final ramp stage, and only when there really is a next item (no LOOP / END card)
+  local nk = (not LIVE and dur and dur > 0 and cd.nextwin) and remfx.nexti() or nil
+  if nk then
+    local what, nxt = "NEXT VIDEO", nil
+    do
+      local k = nk
+      nxt = mp.get_property("playlist/" .. k .. "/title") or mp.get_property("playlist/" .. k .. "/filename") or ""
+      if not mp.get_property("playlist/" .. k .. "/title") then        -- no title yet: show the video ID
+        nxt = nxt:match("[?&]v=([%w_%-]+)") or nxt:match("youtu%.be/([%w_%-]+)") or nxt:gsub("^.*/", "")
+      end
+      nxt = clean_title(unent(nxt)):gsub("[{}\\]", "")
+    end
+    local sec = math.max(0, cd.rem)
+    if hud.light then                                      -- LIGHT: one tiny text line, no box
+      mtext(ass, p.cx1, math.floor(ry - bf * 0.725 - math.max(4, p.u * 0.18)), math.floor(lf * 0.95), ALERT, 0x10,
+        string.format("%s IN %02ds", what, math.floor(sec)), 3, "\\fsp1")
+      sec = nil
+    end
+    if sec then
+    local whole, tenth = math.floor(sec), math.floor((sec % 1) * 10)
+    local tf, nf = math.floor(bf * 0.85), math.floor(lf * 1.0)
+    local head = what .. " IN "
+    local num = string.format("%02d", whole)
+    local tail = string.format(".%ds", tenth)
+    local tw = math.floor((#head + #num + #tail) * tf * 0.62 + tf * 1.6)
+    if nxt and nxt ~= "" then
+      local maxc = math.floor(math.max(tw * 1.6, (rw0 or tw) * 1.4) / (nf * 0.62))
+      if #nxt > maxc then nxt = nxt:sub(1, maxc - 1) .. "…" end
+      tw = math.max(tw, math.floor(#nxt * nf * 0.62 + nf * 1.6))
+    end
+    local th3 = math.floor(tf * 1.6) + ((nxt and nxt ~= "") and math.floor(nf * 1.35) or 0)
+    local bh0 = math.floor(bf * 1.45)
+    local bx, by = math.floor(p.cx1 - tw), math.floor(ry - bh0 / 2 - th3 - math.max(4, p.u * 0.18))
+    local br = { x = bx, y = by, w = tw, h = th3 }
+    ibox(ass, br, false, ALERT)
+    shape(ass, cd.ocol or ALERT, 0x00, function(d) outline(d, bx, by, tw, th3, 1) end)   -- frame breathes with REM
+    local ly0 = by + math.floor(tf * 0.85)
+    mtext(ass, bx + math.floor(tf * 0.7), ly0, tf, "FFFFFF", 0x30, head ..
+      "{\\b1}" .. C(ALERT, 0x00) .. num .. "{\\b0}" .. C(ALERT, 0x50) .. tail, 4, "\\fsp1")
+    if nxt and nxt ~= "" then
+      mtext(ass, bx + math.floor(tf * 0.7), by + th3 - math.floor(nf * 0.95), nf, "FFFFFF", 0x60, nxt, 4)
+    end
+    end
+  end
+  if cd.frm and not hud.light then   -- secondary fast row: frame counter (estimated-frame-number / -count)
+    mtext(ass, x0 - math.floor(lf * 0.9), ry, math.floor(lf * 0.92), cd.ocol or "FFFFFF", cd.ocol and 0x30 or 0x60, cd.frm, 6, "\\fsp1")
+  end
+  mtext(ass, math.floor((p.cx0 + p.cx1) / 2), ry, math.floor(fs * 0.9), st == "PAUSED" and AMBER or ACCENT, 0x00,
+    st_icon(math.floor(fs * 0.9), st == "PAUSED") .. (st or "PLAYING"), 5, "\\fsp3")
+  -- labels under the side softkeys
+  local function lab(x, txt)
+    local f = math.floor(fs * 0.78)
+    if f < 13 then return end
+    mtext(ass, x, p.laby, f, "FFFFFF", 0x40, txt, 8, "\\fsp1")
+  end
+  local vol, muted = mp.get_property_number("volume") or 0, mp.get_property_bool("mute")
+  if b.vol and not p.hero then
+    local f = math.floor(fs * 0.78)
+    if f >= 13 and muted then mtext(ass, b.vol.x + b.vol.w / 2, p.laby, f, RUST, 0x00, "MUTE", 8, "\\fsp1")
+    else lab(b.vol.x + b.vol.w / 2, "MUTE") end
+  end
+  if p.rgrp then                                 -- plate behind the key row (words live on the keys)
+    ibox(ass, p.rgrp, false, ACCENT)
+    local capfs = math.floor(fs * 0.78)
+    if capfs < 13 then capfs = 0 end
+    -- only when a key is too short for its own 13px word
+    if capfs > 0 and b.pin and b.pin.h < 28 and (b.pin.y + b.pin.h + capfs) < (p.rgrp.y + p.rgrp.h - 1) then
+      local cy2 = p.rgrp.y + p.rgrp.h - math.max(4, p.rgrp.ip)
+      local function cap(x, txt) mtext(ass, x, cy2, capfs, "FFFFFF", 0x40, txt, 5, "\\fsp1") end
+      if b.smaller and b.larger then
