@@ -1,0 +1,189 @@
++# behind shows round the edges. Fails (caller falls back to the corner logic) if the parent is gone.
+ place_over() {
+   local c=$1 p addr pw ph px py ux uy uw uh w h x y win
+   p=$(hyprctl clients -j | jq -cer --arg a "$2" 'first(.[] | select(.address == $a)) // empty') || return 1
+@@ -372,8 +397,6 @@ place_over() {
+   addr=$(jq -r .address <<<"$c"); win="address:$addr"
+   [[ $(jq -r .floating <<<"$c") == true ]] ||
+     hypr_dispatch "hl.dsp.window.float({ window = \"$win\", action = \"on\" })" setfloating "$win"
+-  [[ $(jq -r .pinned <<<"$c") == true ]] ||
+-    hypr_dispatch "hl.dsp.window.pin({ window = \"$win\" })" pin "$win"
+   hypr_dispatch "hl.dsp.window.resize({ window = \"$win\", x = $w, y = $h })" resizewindowpixel "exact $w $h,$win"
+   hypr_dispatch "hl.dsp.window.move({ window = \"$win\", x = $x, y = $y })" movewindowpixel "exact $x $y,$win"
+   hypr_dispatch "hl.dsp.window.alter_zorder({ window = \"$win\", mode = \"top\" })" alterzorder "top,$win"
+@@ -594,6 +617,7 @@ case ${1:-} in
+   size) resolve_target; resize_player "${2:-larger}"; exit 0 ;;
+   nudge) resolve_target; nudge_player "${2:-}"; exit 0 ;;
+   fullscreen) resolve_target; toggle_fullscreen; exit 0 ;;
++  pin) resolve_target; window_pin "${2:-toggle}"; exit 0 ;;
+   new) new_player "${2:-}"; exit 0 ;;
+   swap)
+     url=$(read_url "${2:-}")
+@@ -609,7 +633,7 @@ case ${1:-} in
+     [[ -n $SOCK && -S $SOCK ]] && ipc_quick '{"command":["script-message","omaraptor-autoplay","next"]}' ||
+       notify "No omaraptor player is open (SUPER+ALT+Y starts one)"
+     exit 0 ;;
+-  -h|--help) sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
++  -h|--help) sed -n '2,27p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+ esac
+ 
+ if [[ -n ${1:-} ]]; then          # explicit url wins
+diff --git a/config/scripts/omaraptor-hud.lua b/config/scripts/omaraptor-hud.lua
+index 1ad3cd0..1cc5a19 100644
+--- a/config/scripts/omaraptor-hud.lua
++++ b/config/scripts/omaraptor-hud.lua
+@@ -16,6 +16,8 @@
+ --   timeout=7        seconds without mouse movement before it fades out (while playing)
+ --   accent=2EE6A6    RRGGBB accent colour (jade by default)
+ --   size=1.0         overall scale
++--   pin=no           yes starts pinned on every workspace (P / the PIN tile toggles it)
++--   night=off        off | dim | dimmer (n / the NIGHT tile). The last level is written back.
+ --
+ -- Script messages (input.conf / IPC):
+ --   script-message omaraptor-hud flash [label]
+@@ -56,9 +58,10 @@ end
+ local utils = require "mp.utils"
+ 
+ local opts = { position = "bottom", timeout = 7, accent = "2EE6A6", size = 1.0, prompt = false, style = "f22", title = "top", eq = true,
+-  light_mode = false, pin = false }   -- pin=yes: start with the frame + bar pinned on; light_mode=yes: start in HUD LIGHT (bare player); H / HUD tile toggles
++  light_mode = false, pin = false, night = "off" }   -- pin=yes: start pinned on every workspace; night=off|dim|dimmer; light_mode=yes: HUD LIGHT
+ mp_opts.read_options(opts, "omaraptor-hud")
+-local hud = { light = opts.light_mode and true or false, pin = opts.pin and true or false }   -- pin: frame + bar never auto-hide (session)   -- COMBAT (full) / CRUISE (light), per player, kept for the session
++local hud = { light = opts.light_mode and true or false, pin = opts.pin and true or false, dead = false }
++hud.night = ({ dim = 1, ["1"] = 1, dimmer = 2, ["2"] = 2 })[tostring(opts.night or "off"):lower()] or 0
+ local function boot_ok(k) return not hud.boot or mp.get_time() - hud.boot >= k * 0.1 end   -- COMBAT power-on stagger
+ 
+ local SECTION = "omaraptor-hud-input"
+@@ -73,6 +76,9 @@ local OMARAPTOR = os.getenv("OMARAPTOR_BIN") or ((os.getenv("HOME") or "") .. "/
+ 
+ local ov = mp.create_osd_overlay("ass-events")
+ ov.z = 20   -- above the empty window's link panel
++hud.NIGHT_SECTION = "omaraptor-hud-night"
++hud.veil = mp.create_osd_overlay("ass-events")   -- night tint, under the HUD, does not fade with it
++hud.veil.z = 4
+ local fpm = { t = -10, paused = false, timer = nil, ready = false }   -- f22 flight-path-marker flash
+ -- REM countdown: interpolates time-pos between frames so the hundredths run smoothly while playing
+ local remfx = { pos = nil, at = 0, timer = nil }
+@@ -131,8 +137,11 @@ local function prog_col(f)                      -- progress colour, linear per B
+   end
+   return PROG_STOPS[#PROG_STOPS][2]
+ end
+-local function a(base)  -- ASS alpha (00 opaque .. FF clear), faded by state.fade
++local function a(base)  -- ASS alpha (00 opaque .. FF clear), faded by state.fade; night pulls the HUD down a step
+   local v = 255 - math.floor((255 - base) * state.fade + 0.5)
++  local nk = hud.night or 0
++  if nk == 1 then v = v + math.floor((255 - v) * 0.14)
++  elseif nk == 2 then v = v + math.floor((255 - v) * 0.26) end
+   return string.format("%02X", math.max(0, math.min(255, v)))
+ end
+ 
+@@ -225,6 +234,14 @@ local function layout(w, h)
+   local b = {}
+   b.new = { x = side, y = bottom, w = cs, h = cs }
+   b.help = { x = w - side - cs, y = bottom, w = cs, h = cs }
++  local nw = cs
++  if w >= 1100 then nw = math.floor(cs * 4.2)
++  elseif w >= 520 then nw = math.max(96, math.floor(cs * 4.8)) end
++  if nw < cs then nw = cs end
++  local nx = b.help.x - math.max(4, g) - nw
++  if nx >= b.new.x + cs + math.max(4, g) then
++    b.night = { x = nx, y = b.help.y, w = nw, h = cs }
++  end
+   local p = { u = u, g = g, fs = fs, t = t, st = st, x = 0, y = 0, w = 0, h = 0, FS = FSM, side = side, bottom = bottom }
+   if idle_empty_now() then return p, b end          -- empty "new" window: corner buttons only
+   local boxed = style == "frame" or HUD()
+@@ -248,7 +265,8 @@ local function layout(w, h)
+   b.play = { x = px, y = by, w = P, h = P }
+   b.back = { x = px - tg - T, y = math.floor(cy - T / 2), w = T, h = T }
+   b.fwd = { x = px + P + tg, y = math.floor(cy - T / 2), w = T, h = T }
+-  local lab = HUD() and math.floor(fs * 0.95) or 0   -- tiny labels under side buttons
++  local lab = 0
++  if HUD() and math.floor(fs * 0.78) >= 13 then lab = math.floor(fs * 0.78) end   -- under-labels only when they stay readable
+   local sy0 = math.floor(cy - (S + lab) / 2)
+   p.laby = sy0 + S + math.floor(lab * 0.55)
+   local lgap = boxed and 0 or math.floor(g * 0.8)
+@@ -260,9 +278,19 @@ local function layout(w, h)
+   end
+   local room_r = cx1 - (b.fwd.x + T) - g * 2
+   local right = { "smaller", "larger", "fs" }
+-  if style == "f22" then right = { "pin", "hud", "smaller", "larger", "fs" } end   -- PIN + HUD FULL / LIGHT tiles
+-  if #right * S + (#right - 1) * lgap > room_r then right = style == "f22" and { "pin", "hud", "fs" } or { "fs" } end
+-  if #right * S + (#right - 1) * lgap > room_r then right = style == "f22" and { "hud", "fs" } or { "fs" } end
++  if style == "f22" then right = { "pin", "hud", "smaller", "larger", "fs" } end   -- PIN + HUD + size + FS
++  -- Match the -10 / +10 key height when the row allows it. A few px of gap keeps five
++  -- squares from fusing. If they still will not fit, drop size, then PIN, before shrinking
++  -- a key under a tappable size. Labels collapse later; the hit target does not.
++  local rgap = math.max(lgap, style == "f22" and 3 or lgap)
++  local rs = math.min(T, math.max(S, math.floor(u * 1.2)))
++  local function right_w(n, sz) return n * sz + math.max(0, n - 1) * rgap end
++  while rs > S and right_w(#right, rs) > room_r do rs = rs - 1 end
++  if right_w(#right, rs) > room_r then right = style == "f22" and { "pin", "hud", "fs" } or { "fs" } end
++  while rs > math.max(18, math.floor(S * 0.9)) and right_w(#right, rs) > room_r do rs = rs - 1 end
++  if right_w(#right, rs) > room_r then right = style == "f22" and { "hud", "fs" } or { "fs" } end
++  while rs > 16 and right_w(#right, rs) > room_r do rs = rs - 1 end
++  p.rs = rs
+   if volw > room_l then volw = S end
+   b.vol = { x = cx0, y = sy0, w = volw, h = S }
+   p.hero = nil
+@@ -279,7 +307,9 @@ local function layout(w, h)
+   local x = cx1
+   for i = #right, 1, -1 do
+     local k = right[i]
+-    x = x - S; b[k] = { x = x, y = sy0, w = S, h = S }; x = x - lgap
++    local ry = math.floor(cy - rs / 2)
++    if ry + rs > h - 4 then ry = h - 4 - rs end
++    x = x - rs; b[k] = { x = x, y = ry, w = rs, h = rs }; x = x - rgap
+   end
+   local sy = by - math.floor(u * 0.55)              -- seek row, above the buttons
+   if style == "f22" then sy = sy - math.floor(fs * 1.2) end   -- room for the chrono scale numbers
+@@ -296,7 +326,7 @@ local function layout(w, h)
+   p.tth = 0
+   if style == "f22" then
+     local nb, hb = b.new, b.help
+-    p.nav = { x0 = nb.x + nb.w + g * 2, x1 = hb.x - g * 2, y0 = nb.y, h = nb.h }
++    p.nav = { x0 = nb.x + nb.w + g * 2, x1 = (b.night and b.night.x or hb.x) - g * 2, y0 = nb.y, h = nb.h }
+     p.nav.dy = nb.y + nb.h + math.floor(fs * 0.85)           -- data line under the title strip
+     local lf, lh = math.floor(fs * 0.7), math.floor(S * 0.66)
+     local ly = math.floor(sy0 + (S - lh) / 2)
+@@ -321,12 +351,20 @@ local function layout(w, h)
+     if p.hero then           -- right zone mirrors the left: [SPD][REPEAT][BUFFER][SIZE - + FS], all T tall
+       local G, ip = p.hero.G, p.hero.ip
+       local xr0, xr1 = b.fwd.x + T + G, cx1
+-      local cap = math.floor(fs * 0.9)
+-      local bs = math.max(14, math.min(S, T - 2 * ip - cap))
+-      local gi = math.max(3, math.floor(bs * 0.18))
++      local cap = 0                                         -- words sit inside the keys, not under them
++      local gi = math.max(4, math.floor(u * 0.16))
++      local bs = T - 4                                     -- same height as SPEED / REPEAT / LINK
++      if bs < 20 then bs = 20 end
+       local gw2 = 5 * bs + 4 * gi + 2 * ip + 4           -- PIN + HUD + SIZE - + + FS
+       local R = xr1 - xr0 - gw2 - 3 * G
+-      if R >= u * 6 then
++      if R < u * 5 then
++        bs = math.floor((xr1 - xr0 - 3 * G - u * 5 - 2 * ip - 4 - 4 * gi) / 5)
++        if bs > T - 4 then bs = T - 4 end
++        if bs < 20 then bs = 20 end
++        gw2 = 5 * bs + 4 * gi + 2 * ip + 4
++        R = xr1 - xr0 - gw2 - 3 * G
++      end
++      if R >= u * 5 then
+         local ws, wl = math.floor(R * 0.37), math.floor(R * 0.24)
+         local wb = R - ws - wl
+         local y0 = b.fwd.y
+@@ -336,7 +374,7 @@ local function layout(w, h)
+         local gx = b.link.x + wb + G
+         p.rgrp = { x = gx, y = y0, w = xr1 - gx, h = T, ip = ip, cap = cap }
+         local bx = gx + math.floor((xr1 - gx - (5 * bs + 4 * gi)) / 2)
+-        local byy = y0 + ip
++        local byy = y0 + math.floor((T - bs) / 2)
+         b.pin = { x = bx, y = byy, w = bs, h = bs }; bx = bx + bs + gi
+         b.hud = { x = bx, y = byy, w = bs, h = bs }; bx = bx + bs + gi
+         b.smaller = { x = bx, y = byy, w = bs, h = bs }
+@@ -391,6 +429,19 @@ local function layout(w, h)
+       p.title = { x0 = x0, x1 = x1, cy = math.floor(cy), fs = math.floor(fs * 1.1), an = 4 }
+     end
+   end
++  if b.seek then
++    local seek_bot = b.seek.y + b.seek.h + 2
++    for _, k in ipairs({ "pin", "hud", "smaller", "larger", "fs" }) do
++      local r = b[k]
