@@ -1,0 +1,495 @@
+  "WHEEL_UP script-binding " .. me .. "/nop\n" ..
+  "WHEEL_DOWN script-binding " .. me .. "/nop\n", "force")
+mp.add_key_binding("?", "tips", toggle_tips)
+mp.register_event("file-loaded", function() if hud.pin and not state.boot then show() end end)
+mp.add_key_binding("p", "pin", function() if hud.card_off then hud.card_off() end; hud.toggle_pin() end)   -- (overrides mpv's default p = pause; Space still pauses)
+mp.add_key_binding("n", "night", function() if hud.card_off then hud.card_off() end; hud.night_cycle() end)
+mp.register_script_message("pin", function(v)   -- IPC: pin yes / no / (toggle)
+  if v == "yes" or v == "on" then hud.toggle_pin(true) elseif v == "no" or v == "off" then hud.toggle_pin(false) else hud.toggle_pin() end
+end)
+
+-- click on the video (outside the bar) = play / pause ---------------------------------------
+-- The built-in drag is off (mpv.conf input-builtin-dragging=no); we start the window drag
+-- ourselves once the pointer moves past DRAG_PX while held, so a drag never pauses. A click
+-- toggles only after the double-click window passes, so a double-click (fullscreen) leaves
+-- the play state alone.
+local DRAG_PX = 5 * (mp.get_property_number("display-hidpi-scale") or 1)
+local press, click_timer, suppress_up, last_toggle = nil, nil, false, -10
+local function dbl_time() return (mp.get_property_number("input-doubleclick-time") or 300) / 1000 end
+
+local function toggle_from_click()
+  click_timer = nil
+  if state.boot then return end                  -- launcher up: only its FIRE button acts
+  mp.commandv("cycle", "pause")
+  last_toggle = mp.get_time()
+  set_status(mp.get_property_bool("pause") and "PAUSED" or "PLAYING")
+  show(1.2)
+end
+local function arm_click()
+  if click_timer then click_timer:kill() end
+  click_timer = mp.add_timeout(dbl_time(), toggle_from_click)
+end
+
+local function video_click(e)
+  local m = mp.get_property_native("mouse-pos") or { x = 0, y = 0 }
+  local w, h = mp.get_osd_size()
+  if e.event == "down" then
+    press = { x = m.x, y = m.y, t = mp.get_time(), w = w, h = h }
+  elseif e.event == "up" then
+    local p = press; press = nil
+    if suppress_up then suppress_up = false; return end
+    if not p then return end                      -- dragged (or the press started elsewhere)
+    if math.abs(m.x - p.x) > DRAG_PX or math.abs(m.y - p.y) > DRAG_PX then return end
+    if w ~= p.w or h ~= p.h or mp.get_time() - p.t > 0.6 then return end  -- edge resize / long hold
+    arm_click()
+  elseif e.event == "press" then                  -- synthetic (IPC keypress): no down/up pair
+    arm_click()
+  end
+end
+
+local function video_dbl()
+  if click_timer then click_timer:kill(); click_timer = nil      -- first click never applied
+  elseif mp.get_time() - last_toggle < dbl_time() + 0.15 then      -- it slipped through: undo
+    mp.commandv("cycle", "pause")
+  end
+  if press then suppress_up = true end           -- the second release isn't a new click
+  mp.commandv("cycle", "fullscreen")
+end
+
+local function video_drag_check(m)  -- called on every pointer move
+  if press and (math.abs(m.x - press.x) > DRAG_PX or math.abs(m.y - press.y) > DRAG_PX) then
+    press = nil
+    if mp.get_property_bool("fullscreen") ~= true then mp.commandv("begin-vo-dragging") end
+  end
+end
+
+mp.add_key_binding("MBTN_LEFT", "video-click", video_click, { complex = true })
+mp.add_key_binding("MBTN_LEFT_DBL", "video-dbl", video_dbl)
+mp.register_script_message("omaraptor-test-geom", function()   -- dev: button rects for click tests
+  local out = {}
+  for k, r in pairs(state.buttons or {}) do out[k] = { x = r.x, y = r.y, w = r.w, h = r.h } end
+  mp.set_property("user-data/ytf-geom", utils.format_json(out))
+end)
+mp.register_script_message("omaraptor-tape-sim", function(name, act, fy)   -- dev: tape hover/drag self-test
+  local r = state.buttons[name]; if not r then return end
+  local y = (fy == "box") and nil or (r.y + r.h - (tonumber(fy) or 0.5) * r.h)
+  if not y then                                    -- "box": the pointer box centre
+    if name == "vtape" then y = r.y + r.h - clamp01((mp.get_property_number("volume") or 0) / 100) * r.h
+    else
+      local dur, pos = mp.get_property_number("duration") or 1, mp.get_property_number("time-pos") or 0
+      y = r.y + r.h - clamp01((dur - pos) / dur) * r.h
+    end
+  end
+  local m = { x = name == "vtape" and r.x + r.w + 30 or r.x - 30, y = math.floor(y), hover = true }
+  state.mx, state.my = m.x, m.y
+  if act == "hover" then state.hot = name; show(60); render()
+  elseif act == "down" then
+    state.hot = name
+    local real = mp.get_property_native
+    mp.get_property_native = function(p, d) if p == "mouse-pos" then return m end return real(p, d) end
+    click({ event = "down" }); mp.get_property_native = real
+  elseif act == "move" then
+    if state.vdrag then state.drag_moved = true; drag_apply(state.vdrag, m, false); render() end
+  elseif act == "up" then
+    local real = mp.get_property_native
+    mp.get_property_native = function(p, d) if p == "mouse-pos" then return m end return real(p, d) end
+    click({ event = "up" }); mp.get_property_native = real
+  end
+end)
+mp.register_script_message("omaraptor-test-click", function(kind)  -- IPC self-test hooks
+  if kind == "dbl" then video_dbl() else video_click({ event = "press" }) end
+end)
+
+mp.observe_property("mouse-pos", "native", function(_, m)
+  if not m then return end
+  video_drag_check(m)
+  state.mx, state.my, state.mhover = m.x, m.y, m.hover
+  if state.vdrag then state.drag_moved = true; drag_apply(state.vdrag, m, false); render(); return end
+  if state.dragging then
+    if mp.get_time() - state.last_seek > 0.06 then seek_at(m.x, false) end
+    render()
+    return
+  end
+  if not m.hover then
+    if state.visible and not hud.pin and not mp.get_property_bool("pause") then hide() end
+    state.hot = nil
+    if state.visible then render() end
+    return
+  end
+  state.hot = hit(m.x, m.y)
+  show()
+end)
+
+local function refresh() if state.visible or state.fade > 0 then render() end end
+mp.add_timeout(1.5, function() fpm.ready = true end)
+local function fpm_flash(paused)
+  if style ~= "f22" or not fpm.ready or hud.light then return end
+  fpm.t, fpm.paused = mp.get_time(), paused
+  if fpm.timer then fpm.timer:kill() end
+  fpm.timer = mp.add_periodic_timer(1 / 30, function()
+    if mp.get_time() - fpm.t > 2.7 then
+      fpm.timer:kill(); fpm.timer = nil
+    end
+    want()
+  end)
+end
+mp.observe_property("pause", "bool", function(_, paused)
+  fpm_flash(paused)
+  remfx.sync()
+  if paused then show() else refresh(); if state.visible then arm_hide() end end
+end)
+-- volume graphic: transient digital meter on any volume / mute change -----------------------
+-- 20 square segments (5 % each, jade lit / dim grey), big neon "VOL 080" or "MUTED", HUD brackets.
+-- Instant on, holds 0.8 s after the last change, fades out over 0.3 s. mpv's own volume OSD is
+-- silenced with no-osd in input.conf so the two never double up.
+local vol_ov = mp.create_osd_overlay("ass-events")
+vol_ov.z = 25
+local volfx = { fade = 0, hold = nil, timer = nil, ready = false, pin = false, kind = "vol" }
+local AMBER_CORE = "C8E6F0"        -- pale amber neon core (#F0E6C8)
+local function draw_vol()
+  local w, h = mp.get_osd_size()
+  if not w or w <= 0 or volfx.fade <= 0 then vol_ov:remove(); return end
+  local saved = state.fade; state.fade = volfx.fade      -- reuse a() / neon() with our own fade
+  local muted, vol = mp.get_property_bool("mute"), mp.get_property_number("volume") or 0
+  local u = math.floor(math.max(20, math.min(38, h * 0.075)) * opts.size + 0.5)
+  if style == "f22" and mp.get_property_bool("fullscreen") then
+    u = math.floor(math.max(28, math.min(62, h * 0.030)) * opts.size + 0.5)          -- FS: fits between heading tape and scope rings
+  end
+  local N = 20
+  local seg = math.max(7, math.floor(math.min(w * 0.6, u * 12) / N * 0.78))
+  local sg = math.max(2, math.floor(seg * 0.28))
+  local mw = N * seg + (N - 1) * sg
+  local pad = math.floor(u * 0.45)
+  local big = math.floor(u * 0.95)
+  local pw, ph = mw + 2 * pad, pad + big + math.floor(u * 0.35) + seg + pad
+  -- upper band: clear of the top strip / heading tape and above the centre scope + lock rings
+  local x0, y0 = math.floor((w - pw) / 2), math.floor(h * ((style == "f22" and mp.get_property_bool("fullscreen")) and 0.264 or 0.235) - ph / 2)
+  local ass = assdraw.ass_new()
+  if volfx.kind ~= "vol" then                        -- SPD / LOOP / BUFFER: same popup, amber frame
+    local kind = volfx.kind
+    local bigt, lt, rt, M, lit2
+    local FC, FCORE = AMBER, AMBER_CORE
+    if kind == "seek" then                            -- REM tape drag: jade seek stamp, target + delta
+      local dur = mp.get_property_number("duration") or 0
+      local tgt = state.seek_tgt or mp.get_property_number("time-pos") or 0
+      local d = tgt - (state.seek_from or tgt)
+      local ad = math.floor(math.abs(d) + 0.5)
+      FC, FCORE = ACCENT, nil
+      local i = math.floor(tgt)
+      bigt = (i >= 3600 and string.format("%d:%02d:%02d", math.floor(i / 3600), math.floor(i / 60) % 60, i % 60)
+        or string.format("%02d:%02d", math.floor(i / 60), i % 60)) .. string.format(".%03d", math.floor((tgt - i) * 1000))
+      lt = string.format("SEEK  T-%s", dtime(math.max(0, dur - tgt)))
+      rt = string.format("%s%02d:%02d", d < 0 and "-" or "+", math.floor(ad / 60), ad % 60)
+      M, lit2 = 20, dur > 0 and math.max(0, math.min(20, math.floor(tgt / dur * 20 + 0.5))) or 0
+    elseif kind == "spd" then
+      local sp = mp.get_property_number("speed") or 1
+      bigt = string.format("SPD %.2fx", sp); lt = "SPEED"
+      rt = math.abs(sp - 1) < 0.001 and "NORM" or (sp > 1 and "FAST" or "SLOW")
+      M, lit2 = 16, math.max(0, math.min(16, math.floor(sp / 2 * 16 + 0.5)))       -- 0 .. 2.00x, 0.125x a cell
+    elseif kind == "hud" then
+      bigt = hud.light and "CRUISE MODE" or "COMBAT MODE"; lt = "HUD"; rt = hud.light and "MIN" or "MAX"
+      M, lit2 = 2, hud.light and 1 or 2
+    elseif kind == "loop" then
+      local on = (mp.get_property("loop-file") or "no") ~= "no"
+      bigt = on and "LOOP ON" or "LOOP OFF"; lt = "REPEAT"; rt = on and "FILE" or "ONCE"
+      M, lit2 = 2, on and 2 or 1                                                    -- two-cell switch: OFF | ON
+    else
+      local net = mp.get_property_bool("demuxer-via-network")
+      local c = mp.get_property_number("demuxer-cache-duration") or 0
+      local stall = mp.get_property_bool("paused-for-cache")
+      bigt = not net and "BUFFER LOCAL" or (stall and "BUFFERING" or string.format("BUFFER %02ds", math.min(99, math.floor(c))))
+      lt = "LINK"; rt = net and "NET" or "FILE"
+      M, lit2 = 20, net and math.max(0, math.min(20, math.floor(c / 3 + 0.5))) or 20   -- 0 .. 60 s, 3 s a cell
+    end
+    shape(ass, INK, 0x38, function(d) d:rect_cw(x0, y0, x0 + pw, y0 + ph) end)
+    shape(ass, "FFFFFF", 0xF6, function(d) for y = y0 + 2, y0 + ph - 2, 3 do d:rect_cw(x0 + 1, y, x0 + pw - 1, y + 1) end end)
+    shape(ass, FC, 0x40, function(d) outline(d, x0, y0, pw, ph, 1) end)
+    shape(ass, FC, 0x00, function(d) ticks(d, x0, y0, pw, ph, 2, math.floor(u * 0.5)) end)
+    local ry = y0 + pad + math.floor(big / 2)
+    local fs = math.max(10, math.floor(u * 0.48 + 0.5))
+    mtext(ass, x0 + pad, ry, math.floor(fs * 0.9), "FFFFFF", 0x58, lt, 4, "\\fsp3")
+    mtext(ass, x0 + pw - pad, ry, math.floor(fs * 0.9), FC, 0x10, rt, 6, "\\fsp3")
+    neon(ass, math.floor(w / 2), ry, big, bigt, 5, "", nil, FC, FCORE)
+    local sy = y0 + ph - pad - seg
+    local cw = math.floor((mw - (M - 1) * sg) / M)
+    local function cell(i) local x = x0 + pad + (i - 1) * (cw + sg); return x, x + cw end
+    if kind == "loop" or kind == "hud" then         -- switch: the active half lit, the other dim
+      for i = 1, 2 do
+        local xa, xb = cell(i)
+        local on = i == lit2
+        shape(ass, on and FC or "FFFFFF", on and 0x00 or 0xC8, function(d) d:rect_cw(xa, sy, xb, sy + seg) end)
+        mtext(ass, (xa + xb) / 2, sy + seg / 2, math.max(7, math.floor(seg * 0.8)), on and INK or "FFFFFF", on and 0x00 or 0x60,
+          kind == "hud" and (i == 1 and "CRUISE" or "COMBAT") or (i == 1 and "OFF" or "ON"), 5, "\\fsp2")
+      end
+    else
+      shape(ass, "FFFFFF", 0xC8, function(d) for i = lit2 + 1, M do local xa, xb = cell(i); d:rect_cw(xa, sy, xb, sy + seg) end end)
+      if lit2 > 0 then
+        local _, xe = cell(lit2)
+        ass:new_event()
+        ass:append(string.format("{\\an7\\pos(0,0)\\shad0\\bord%d\\blur%d\\1c&H%s&\\3c&H%s&\\1a&H%s&\\3a&H%s&}",
+          math.floor(seg * 0.35), math.floor(seg * 0.6), FC, FC, a(0x90), a(0xC0)))
+        ass:draw_start(); ass:rect_cw(x0 + pad, sy, xe, sy + seg); ass:draw_stop()
+        shape(ass, FC, 0x00, function(d) for i = 1, lit2 do local xa, xb = cell(i); d:rect_cw(xa, sy, xb, sy + seg) end end)
+      end
+      if kind == "spd" then                          -- 1.00x reference notch above the meter
+        local _, xn = cell(8)
+        shape(ass, "FFFFFF", 0x30, function(d) d:rect_cw(xn + sg / 2 - 1, sy - math.floor(seg * 0.5), xn + sg / 2 + 1, sy - 2) end)
+      end
+    end
+    state.fade = saved
+    vol_ov.res_x, vol_ov.res_y, vol_ov.data = w, h, ass.text
+    vol_ov:update()
+    return
+  end
+  shape(ass, INK, 0x38, function(d) d:rect_cw(x0, y0, x0 + pw, y0 + ph) end)
+  shape(ass, "FFFFFF", 0xF6, function(d)
+    for y = y0 + 2, y0 + ph - 2, 3 do d:rect_cw(x0 + 1, y, x0 + pw - 1, y + 1) end
+  end)
+  shape(ass, "FFFFFF", 0xB8, function(d) outline(d, x0, y0, pw, ph, 1) end)
+  local MC = muted and RUST or ACCENT
+  shape(ass, MC, 0x00, function(d) ticks(d, x0, y0, pw, ph, 2, math.floor(u * 0.5)) end)
+  local ry = y0 + pad + math.floor(big / 2)
+  local fs = math.max(10, math.floor(u * 0.48 + 0.5))
+  mtext(ass, x0 + pad, ry, math.floor(fs * 0.9), "FFFFFF", 0x58, muted and "AUDIO" or "VOL", 4, "\\fsp3")
+  mtext(ass, x0 + pw - pad, ry, math.floor(fs * 0.9), muted and RUST or "FFFFFF", muted and 0x00 or 0x58,
+    muted and "OFF" or (vol > 100 and "BOOST" or "%"), 6, "\\fsp3")
+  local txt = muted and "MUTED" or string.format("VOL %03d", math.floor(vol + 0.5))
+  if muted then neon(ass, math.floor(w / 2), ry, big, txt, 5, "", nil, RUST, RUST_CORE)
+  else neon(ass, math.floor(w / 2), ry, big, txt, 5, "") end
+  local lit = muted and 0 or math.min(N, math.floor(vol / (100 / N) + 0.5))
+  local sy = y0 + ph - pad - seg
+  shape(ass, "FFFFFF", 0xC8, function(d)             -- dim grey segments
+    for i = lit + 1, N do local x = x0 + pad + (i - 1) * (seg + sg); d:rect_cw(x, sy, x + seg, sy + seg) end
+  end)
+  if muted then                                      -- muted: the kept level as jade outlines, struck through
+    local ml = math.min(N, math.floor(vol / (100 / N) + 0.5))
+    shape(ass, RUST, 0x40, function(d)
+      for i = 1, ml do local x = x0 + pad + (i - 1) * (seg + sg); outline(d, x, sy, seg, seg, 1) end
+    end)
+    shape(ass, RUST, 0x20, function(d) d:rect_cw(x0 + pad, sy + math.floor(seg / 2), x0 + pad + mw, sy + math.floor(seg / 2) + 1) end)
+  elseif lit > 0 then
+    local xe = x0 + pad + lit * (seg + sg) - sg
+    ass:new_event()                                  -- glow under the lit run
+    ass:append(string.format("{\\an7\\pos(0,0)\\shad0\\bord%d\\blur%d\\1c&H%s&\\3c&H%s&\\1a&H%s&\\3a&H%s&}",
+      math.floor(seg * 0.35), math.floor(seg * 0.6), ACCENT, ACCENT, a(0x80), a(0xB0)))
+    ass:draw_start(); ass:rect_cw(x0 + pad, sy, xe, sy + seg); ass:draw_stop()
+    shape(ass, ACCENT, 0x00, function(d)
+      for i = 1, lit do local x = x0 + pad + (i - 1) * (seg + sg); d:rect_cw(x, sy, x + seg, sy + seg) end
+    end)
+  end
+  state.fade = saved
+  vol_ov.res_x, vol_ov.res_y, vol_ov.data = w, h, ass.text
+  vol_ov:update()
+end
+local function vol_kill() if volfx.timer then volfx.timer:kill(); volfx.timer = nil end end
+local function vol_pop(kind)
+  if not volfx.ready or idle_empty_now() then return end
+  volfx.kind = kind or "vol"
+  vol_kill(); if volfx.hold then volfx.hold:kill() end
+  volfx.fade = 1; draw_vol()
+  if volfx.pin or state.vdrag == "vtape" or state.vdrag == "ttape" then return end   -- held while dragging
+  volfx.hold = mp.add_timeout(0.8, function()
+    local t0 = mp.get_time()
+    volfx.timer = mp.add_periodic_timer(1 / 30, function()
+      volfx.fade = math.max(0, 1 - (mp.get_time() - t0) / 0.3)
+      draw_vol()
+      if volfx.fade <= 0 then vol_kill(); vol_ov:remove() end
+    end)
+  end)
+end
+mp.add_timeout(1.5, function() volfx.ready = true end)   -- not for the startup values
+mp.observe_property("mute", "bool", function() refresh(); vol_pop() end)
+mp.observe_property("fullscreen", "bool", function(...) refresh(...); remfx.sync() end)   -- swaps the fullscreen button icon; LIVE tape clock
+mp.observe_property("volume", "number", function() refresh(); vol_pop() end)
+mp.observe_property("duration", "number", refresh)
+mp.observe_property("speed", "number", function() refresh(); vol_pop("spd") end)
+mp.observe_property("loop-file", "native", function() refresh(); vol_pop("loop") end)
+mp.observe_property("paused-for-cache", "bool", function(_, v) if v then vol_pop("link") end end)   -- stall: BUFFERING
+info_pop = function(kind) vol_pop(kind) end
+
+-- audio signal meter feed ----------------------------------------------------------------------
+-- astats on a labelled af (added at load, never touches mpv.conf); reset=3 ~ 60 ms windows.
+local EQ_AF = "@ytfeq:lavfi=[astats=metadata=1:reset=2:measure_perchannel=Peak_level:measure_overall=RMS_level]"
+local EQ_DROP = true                 -- LIGHT removes the astats filter (restored on FULL)
+local function eq_has_af()
+  for _, f in ipairs(mp.get_property_native("af") or {}) do if f.label == "ytfeq" then return true end end
+  return false
+end
+if opts.eq and not (hud.light and EQ_DROP) and not eq_has_af() then mp.commandv("af", "add", EQ_AF) end
+local function eq_db(v) v = tonumber(v); if not v or v ~= v or v < -90 then return -90 end; return v end
+local function linkh_tick(now)
+  if now - linkh.t < 0.24 then return false end
+  linkh.t = now
+  local c = mp.get_property_bool("demuxer-via-network") and (mp.get_property_number("demuxer-cache-duration") or 0) or 60
+  linkh[#linkh + 1] = c
+  if #linkh > 120 then table.remove(linkh, 1) end
+  return true
+end
+local function eq_tick()
+  local now = mp.get_time()
+  if not state.visible and state.fade <= 0 then linkh_tick(now); return end
+  local dt = eq.t > 0 and math.min(0.2, now - eq.t) or 0; eq.t = now
+  local md = mp.get_property_native("af-metadata/ytfeq")
+  local audio = mp.get_property_native("current-tracks/audio") ~= nil
+  local idle = mp.get_property_bool("pause") or mp.get_property_bool("paused-for-cache")   -- mute: keeps measuring (pre-mute af)
+  eq.have = audio and (eq.have or (md ~= nil and next(md) ~= nil))
+  local tgt = { -90, -90, -90 }
+  if md and not idle then
+    local l = eq_db(md["lavfi.astats.1.Peak_level"])
+    local r2 = md["lavfi.astats.2.Peak_level"] and eq_db(md["lavfi.astats.2.Peak_level"]) or l
+    tgt = { l, r2, eq_db(md["lavfi.astats.Overall.RMS_level"]) }
+  end
+  local busy = false
+  for i = 1, 3 do
+    if tgt[i] >= eq.lv[i] then eq.lv[i] = tgt[i] else eq.lv[i] = math.max(tgt[i], eq.lv[i] - 54 * dt) end
+    if eq.lv[i] >= eq.pk[i] then eq.pk[i], eq.pkt[i] = eq.lv[i], now
+    elseif now - eq.pkt[i] > 0.6 then eq.pk[i] = math.max(-90, eq.pk[i] - 30 * dt) end
+    if eq.pk[i] > -43 then busy = true end
+  end
+  local lk_new = linkh_tick(now)
+  if state.fade > 0 and state.panel and ((busy or eq.was_busy) and state.panel.eq or (lk_new and state.panel.rhero)) then want() end
+  eq.was_busy = busy
+end
+-- 25 Hz while the bar is up; hidden: 4 Hz, BUFFER history only (no meter / property churn)
+if opts.eq then eq.timer = mp.add_periodic_timer(1 / 25, eq_tick) end
+function eq.rate(up)
+  if not eq.timer then return end
+  if hud.light then eq.timer:kill(); return end      -- LIGHT: no meter, no BUFFER history
+  local want_t = up and 1 / 25 or 0.25
+  if eq.timer.timeout ~= want_t or not eq.timer:is_enabled() then
+    eq.timer:kill(); eq.timer.timeout = want_t; eq.t = 0; eq.timer:resume()
+  end
+end
+eq.rate(state.visible)
+set_light = function(on, pop)
+  on = on and true or false
+  local changed = on ~= hud.light
+  hud.light = on
+  if on then
+    if fpm.timer then fpm.timer:kill(); fpm.timer = nil end
+    marquee_run(false)
+    eq.have = false
+    if opts.eq and EQ_DROP and eq_has_af() then mp.commandv("af", "remove", "@ytfeq") end
+  elseif opts.eq and EQ_DROP and not eq_has_af() then mp.commandv("af", "add", EQ_AF) end
+  eq.rate(state.visible)
+  remfx.sync()
+  hud.tkey = nil
+  mp.set_property_native("user-data/omaraptor-hud-mode", on and "light" or "full")
+  if changed or pop then
+    if state.visible then render(); set_section(true) else refresh() end
+  end
+  if pop and info_pop then info_pop("hud") end
+end
+mp.set_property_native("user-data/omaraptor-hud-mode", hud.light and "light" or "full")
+-- MASTER ARM / STAND DOWN panel ------------------------------------------------------------
+-- H or the HUD tile opens it. CRUISE -> COMBAT: guarded switch (click 1 lifts the guard, click 2 /
+-- drag up flips it), "COMBAT MODE ENGAGED", HUD powers on staggered over 0.5 s. COMBAT -> CRUISE:
+-- single toggle, "CRUISE MODE". Enter confirms; Esc / H / click outside / 5 s cancels.
+-- Timers exist only while the panel or its flash / power-on runs.
+do
+local ARM_SECTION = "omaraptor-hud-arm"
+local arm_ov = mp.create_osd_overlay("ass-events")
+arm_ov.z = 30
+local arm = { open = false }
+local function arm_kill()
+  for _, k in ipairs({ "to", "ft", "bt", "dt" }) do if arm[k] then arm[k]:kill(); arm[k] = nil end end
+end
+local function arm_geom(w, h)
+  local u = math.floor(math.max(20, math.min(38, h * 0.075)) * opts.size + 0.5)
+  if mp.get_property_bool("fullscreen") then u = math.floor(math.max(28, math.min(62, h * 0.030)) * opts.size + 0.5) end
+  local pw, ph = math.floor(u * 10), math.floor(u * 7.4)
+  local g = { u = u, x = math.floor((w - pw) / 2), y = math.floor((h - ph) / 2), w = pw, h = ph }
+  local sw, sh = math.floor(u * 1.5), math.floor(u * 2.3)
+  g.sw = { x = math.floor((w - sw) / 2), y = g.y + math.floor(u * 1.55), w = sw, h = sh }
+  local gp = math.max(3, math.floor(u * 0.14))
+  g.gd = { x = g.sw.x - gp, y = g.sw.y - gp, w = sw + 2 * gp, h = sh + 2 * gp }       -- closed guard cover
+  return g
+end
+local function draw_arm()
+  local w, h = mp.get_osd_size()
+  if not arm.open or not w or w <= 0 then arm_ov:remove(); return end
+  local saved = state.fade; state.fade = 1
+  local g = arm_geom(w, h); arm.g = g
+  local u, x0, y0, pw, ph = g.u, g.x, g.y, g.w, g.h
+  local pad, fs = math.floor(u * 0.45), math.max(10, math.floor(u * 0.42 + 0.5))
+  local ass = assdraw.ass_new()
+  local combat = arm.target == "combat"
+  shape(ass, INK, 0x28, function(d) d:rect_cw(x0, y0, x0 + pw, y0 + ph) end)
+  shape(ass, "FFFFFF", 0xF6, function(d) for y = y0 + 2, y0 + ph - 2, 3 do d:rect_cw(x0 + 1, y, x0 + pw - 1, y + 1) end end)
+  shape(ass, AMBER, 0x40, function(d) outline(d, x0, y0, pw, ph, 1) end)
+  shape(ass, AMBER, 0x00, function(d) ticks(d, x0, y0, pw, ph, 2, math.floor(u * 0.5)) end)
+  local hy = y0 + pad + math.floor(fs * 0.5)
+  mtext(ass, x0 + pad, hy, fs, "FFFFFF", 0x58, combat and "ARM PANEL" or "HUD PANEL", 4, "\\fsp3")
+  mtext(ass, x0 + pw - pad, hy, fs, AMBER, 0x10, combat and "CRUISE > COMBAT" or "COMBAT > CRUISE", 6, "\\fsp2")
+  shape(ass, AMBER, 0xA0, function(d) d:rect_cw(x0 + pad, hy + fs, x0 + pw - pad, hy + fs + 1) end)
+  local r, up = g.sw, arm.flipped
+  if combat then up = arm.flipped else up = not arm.flipped end            -- STAND DOWN starts armed (up)
+  -- side lamps: SAFE (lever down) | ARM (lever up)
+  local lq = math.floor(u * 0.32)
+  local function lamp(cx, txt, on, col)
+    local ly = r.y + math.floor(r.h / 2)
+    shape(ass, on and col or "FFFFFF", on and 0x00 or 0xB0, function(d) d:rect_cw(cx - lq / 2, ly - lq - 2, cx + lq / 2, ly - 2) end)
+    mtext(ass, cx, ly + math.floor(fs * 0.7), math.floor(fs * 0.85), on and col or "FFFFFF", on and 0x00 or 0x70, txt, 5, "\\fsp2")
+  end
+  lamp(r.x - math.floor(u * 1.5), "SAFE", not up, ACCENT)
+  lamp(r.x + r.w + math.floor(u * 1.5), "ARM", up, AMBER)
+  -- switch housing, slot, lever (square knob on a shaft)
+  shape(ass, INK, 0x00, function(d) d:rect_cw(r.x, r.y, r.x + r.w, r.y + r.h) end)
+  shape(ass, "FFFFFF", 0x60, function(d) outline(d, r.x, r.y, r.w, r.h, 1) end)
+  local sx, slw = math.floor(r.x + r.w / 2), math.max(3, math.floor(r.w * 0.16))
+  local m = math.floor(r.h * 0.12)
+  shape(ass, "FFFFFF", 0xC8, function(d) d:rect_cw(sx - slw, r.y + m, sx + slw, r.y + r.h - m) end)
+  local kq = math.floor(r.w * 0.56)
+  local ky = up and (r.y + m) or (r.y + r.h - m - kq)
+  local kc = up and AMBER or ACCENT
+  shape(ass, kc, 0x50, function(d) d:rect_cw(sx - 1, math.floor(r.y + r.h / 2), sx + 2, ky + (up and kq or 0)) end)
+  shape(ass, kc, 0x00, function(d) d:rect_cw(sx - kq / 2, ky, sx + kq / 2, ky + kq) end, 1, INK, 0x00)
+  shape(ass, INK, 0x30, function(d) for i = 1, 3 do local y = ky + math.floor(kq * i / 4); d:rect_cw(sx - kq / 2 + 3, y, sx + kq / 2 - 3, y + 1) end end)
+  -- guard cover (COMBAT only): closed = hazard plate over the switch; open = flipped up above it
+  if combat then
+    local gd = g.gd
+    if not arm.guard then
+      shape(ass, AMBER, 0x30, function(d) d:rect_cw(gd.x, gd.y, gd.x + gd.w, gd.y + gd.h) end)
+      local st = math.max(3, math.floor(gd.h / 9))
+      shape(ass, INK, 0x10, function(d) for y = gd.y + st, gd.y + gd.h - st, 2 * st do d:rect_cw(gd.x + 2, y, gd.x + gd.w - 2, y + st) end end)
+      shape(ass, AMBER, 0x00, function(d) outline(d, gd.x, gd.y, gd.w, gd.h, 2) end)
+      local tw = math.floor(fs * 3.6)
+      shape(ass, INK, 0x00, function(d) d:rect_cw(gd.x + gd.w / 2 - tw / 2, gd.y + gd.h / 2 - fs * 0.7, gd.x + gd.w / 2 + tw / 2, gd.y + gd.h / 2 + fs * 0.7) end)
+      mtext(ass, math.floor(gd.x + gd.w / 2), math.floor(gd.y + gd.h / 2), math.floor(fs * 0.9), AMBER, 0x00, "GUARD", 5, "\\b1\\fsp2")
+    else
+      local th = math.max(4, math.floor(u * 0.26))
+      local gy = gd.y - th - math.floor(u * 0.12)
+      shape(ass, AMBER, 0x30, function(d) d:rect_cw(gd.x, gy, gd.x + gd.w, gy + th) end)
+      shape(ass, INK, 0x10, function(d) local st = math.max(3, math.floor(gd.w / 9))
+        for x = gd.x + st, gd.x + gd.w - st, 2 * st do d:rect_cw(x, gy + 1, x + st, gy + th - 1) end end)
+      shape(ass, AMBER, 0x00, function(d) outline(d, gd.x, gy, gd.w, th, 1); d:rect_cw(gd.x, gd.y - 2, gd.x + gd.w, gd.y) end)  -- plate + hinge
+    end
+  end
+  -- title / flash / hint
+  local ty = r.y + r.h + math.floor(u * 0.95)
+  local fl = arm.flash
+  if fl then
+    local t = mp.get_time() - fl.t0
+    local vis = t > 0.45 or math.floor(t * 10) % 2 == 0                 -- 2 quick blinks, then steady
+    if vis then neon(ass, math.floor(w / 2), ty, math.floor(u * 0.66), fl.txt, 5, "", nil, ACCENT) end
+    mtext(ass, math.floor(w / 2), y0 + ph - pad, math.floor(fs * 0.85), "FFFFFF", 0x50, fl.sub, 2, "\\fsp2")
+  else
+    neon(ass, math.floor(w / 2), ty, math.floor(u * 0.78), combat and "MASTER ARM" or "STAND DOWN", 5, "", nil, AMBER, "C8E6F0")
+    local hint = combat and (arm.guard and "CLICK / DRAG UP: ARM  ·  ESC" or "CLICK: LIFT GUARD  ·  ENTER  ·  ESC")
+      or "CLICK: SAFE  ·  ENTER  ·  ESC"
+    mtext(ass, math.floor(w / 2), y0 + ph - pad, math.floor(fs * 0.85), "FFFFFF", 0x50, hint, 2, "\\fsp2")
+  end
+  state.fade = saved
+  arm_ov.res_x, arm_ov.res_y, arm_ov.data = w, h, ass.text
+  arm_ov:update()
+  mp.set_property_native("user-data/omaraptor-hud-arm", { open = true, target = arm.target, guard = arm.guard or false,
+    flipped = arm.flipped or false, flash = fl and fl.txt or "", sw = g.sw, guard_box = g.gd,
+    panel = { x = g.x, y = g.y, w = g.w, h = g.h } })
+end
+local function arm_close()
+  if not arm.open then return end
+  arm_kill(); arm.open = false; arm.flash = nil
+  mp.input_disable_section(ARM_SECTION)
+  arm_ov:remove()
+  mp.set_property_native("user-data/omaraptor-hud-arm", { open = false })
+end
