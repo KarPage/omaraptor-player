@@ -1,0 +1,478 @@
+    mp.input_disable_section(SEC); B.akey = nil
+    if B.on then for i = 1, 4 do mp.set_property_number(MR[i], B.m0[i]) end end
+    B.on, B.mkey, B.phase = false, nil, nil
+    B.ov:remove()
+  end
+  function B.finish()
+    B.stop()
+    if B.idle0 then mp.set_property("idle", B.idle0) end
+    show(4)
+  end
+  function B.launch()
+    B.phase, B.tF, B.live = "launch", mp.get_time(), false
+    B.pub("fire"); B.rate(0.04); B.draw()
+  end
+  function B.press()                     -- the one action: FIRE (armed) or RETRY (no signal)
+    if B.phase == "armed" then B.flash = mp.get_time(); B.launch()
+    elseif B.phase == "fail" then
+      B.fail, B.tr, B.loaded, B.flash = nil, nil, nil, mp.get_time()
+      mp.set_property_bool("pause", true)
+      mp.commandv("loadfile", B.url, "replace")   -- start-file sees B.on: same boot goes on
+      B.launch()
+    end
+  end
+  function B.abort()                     -- Esc: back to the home screen, the link still in the field
+    if not B.on or B.live then return end
+    local url = B.url
+    B.clip = false; B.stop()
+    mp.set_property("idle", "yes")
+    mp.commandv("playlist-clear"); mp.commandv("stop")
+    mp.set_property_bool("pause", false)
+    mp.add_timeout(0.2, function() if idle_empty() then open_prompt(url or "") end end)
+  end
+  mp.add_key_binding(nil, "boot-fire", B.press)
+  mp.add_key_binding(nil, "boot-abort", B.abort)
+  mp.input_define_section(SEC,
+    "MBTN_LEFT script-binding " .. me .. "/boot-fire\n" ..
+    "MBTN_LEFT_DBL script-binding " .. me .. "/nop\n" ..
+    "ENTER script-binding " .. me .. "/boot-fire\n" ..
+    "KP_ENTER script-binding " .. me .. "/boot-fire\n" ..
+    "SPACE script-binding " .. me .. "/boot-fire\n" ..
+    "ESC script-binding " .. me .. "/boot-abort\n", "force")
+  function B.platform(url)
+    local host = ((url or ""):match("^%a+://([^/?#:]+)") or ""):lower():gsub("^www%.", ""):gsub("^m%.", "")
+    if host:match("youtube") or host == "youtu.be" then return "YOUTUBE" end
+    if host == "x.com" or host:match("twitter%.com$") then return "X" end
+    for _, p in ipairs({ "twitch", "tiktok", "vimeo", "kick", "rumble", "dailymotion", "reddit" }) do
+      if host:match(p) then return p:upper() end
+    end
+    return host ~= "" and host:upper() or "LOCAL FILE"
+  end
+  function B.crt(ass, g, d)   -- old-CRT switch-on: a centre line, then the picture opens vertically
+    local x0, y0, x1, y1, t = g.sx0, g.sy0, g.sx1, g.sy1, g.t
+    local cx, cy = (x0 + x1) / 2, math.floor((y0 + y1) / 2)
+    local function box(a, b, c, e, col, al)
+      if c <= a or e <= b then return end
+      ass:new_event()
+      ass:append(string.format("{\\an7\\pos(0,0)\\bord0\\shad0\\1c&H%s&\\1a&H%02X&\\p1}", col, al))
+      ass:draw_start(); ass:rect_cw(a, b, c, e); ass:draw_stop()
+    end
+    local p1 = math.min(1, d / 0.07)
+    local p2 = math.max(0, math.min(1, (d - 0.07) / 0.25))
+    local hh = math.max(t, math.floor((y1 - y0) / 2 * (1 - (1 - p2) ^ 3)))   -- eased band half-height
+    if p2 <= 0 then box(x0, y0, x1, y1, "000000", 0)     -- still dark: only the line shows
+    else box(x0, y0, x1, cy - hh, "000000", 0); box(x0, cy + hh, x1, y1, "000000", 0) end
+    local th = math.max(2, t)
+    if p2 <= 0 then                                 -- the line: grows out from the centre, white hot
+      local hw = (x1 - x0) / 2 * (1 - (1 - p1) ^ 2)
+      box(math.floor(cx - hw), cy - th, math.floor(cx + hw), cy + th, "F4FFF8", 0)
+      box(math.floor(cx - hw), cy - 4 * th, math.floor(cx + hw), cy + 4 * th, ACCENT, 0xB0)
+    else                                            -- it splits: two edges race apart and fade
+      local al = math.floor(p2 * 0xD0)
+      box(x0, cy - hh - th, x1, cy - hh + th, CORE, al); box(x0, cy + hh - th, x1, cy + hh + th, CORE, al)
+    end
+    if d >= 0.32 then box(x0, y0, x1, y1, CORE, 0xD8) end   -- one-frame flicker as it settles
+  end
+  -- gauge cluster (right of the screen): badge + title + chips, SIGNAL and BUFFER bars, and three
+  -- annunciator tiles (MASTER ARM / SEEKER / RELEASE). Square shapes only, bars batched into one
+  -- event per colour; drawn by the same boot timer, nothing of its own.
+  function B.cluster(ass, g, fa, ph, s, el, ready, tgo, T)
+    if fa >= 250 then return end
+    local x0, x1, y0, yb = g.lx, g.lx1, g.ly0, g.sy1 + 3 * g.t
+    local u, t = g.lf, math.max(1, g.t)
+    local W = x1 - x0
+    local function A(al) return math.min(255, al + fa) end
+    local function rects(col, al, list)                        -- many rects, one ASS event
+      if #list == 0 or A(al) >= 255 then return end
+      ass:new_event()
+      ass:append(string.format("{\\an7\\pos(0,0)\\bord0\\shad0\\1c&H%s&\\1a&H%02X&\\p1}", col, A(al)))
+      ass:draw_start()
+      for _, r in ipairs(list) do ass:rect_cw(math.floor(r[1]), math.floor(r[2]), math.floor(r[3]), math.floor(r[4])) end
+      ass:draw_stop()
+    end
+    local function box(a, b, c, d, col, al) if c > a and d > b then rects(col, al, { { a, b, c, d } }) end end
+    local function frame(a, b, c, d, col, al)
+      rects(col, al, { { a, b, c, b + t }, { a, d - t, c, d }, { a, b + t, a + t, d - t }, { c - t, b + t, c, d - t } })
+    end
+    local function txt(x, y, an, f, s_, col, al, extra)
+      ass:new_event()
+      ass:append(string.format("{\\an%d\\pos(%d,%d)\\fn%s\\fs%d\\bord0\\shad0\\q2\\1c&H%s&\\1a&H%02X&%s}%s",
+        an, math.floor(x), math.floor(y), MONO, f, col, A(al), extra or "", (s_:gsub("[{}\\]", ""))))
+    end
+    local function fit(v, n)                                   -- cut to n chars, never mid UTF-8 sequence
+      if #v <= n then return v end
+      return (v:sub(1, math.max(1, n - 1)):gsub("[\192-\255][\128-\191]*$", "")) .. "…"
+    end
+    local blink = math.floor(T * 3) % 2 == 0
+    local y = y0
+    -- header: platform badge, uploader on the right
+    local bf = math.floor(u * 0.92)
+    local plat = B.plat or "LINK"
+    local bh = math.floor(u * 1.75)
+    local bw = math.floor(#plat * (bf * 0.6 + 2) + u * 1.3)
+    box(x0, y, x0 + bw, y + bh, ACCENT, 0)
+    txt(x0 + bw / 2, y + bh / 2, 5, bf, plat, INK, 0, "\\b1\\fsp2")
+    local by = B.loaded and (mp.get_property("metadata/by-key/uploader", "") or "") or ""
+    if by ~= "" then
+      local sf = math.floor(u * 0.8)
+      txt(x1, y + bh / 2, 6, sf, fit(by:upper(), math.floor((W - bw - u) / (sf * 0.6 + 2))), "FFFFFF", 0x60, "\\fsp2")
+    end
+    y = y + bh + math.floor(u * 0.75)
+    -- title: two lines, fixed room so nothing below jumps when it lands
+    local tf = math.floor(u * 1.08)
+    local lh = math.floor(tf * 1.4)
+    local cpl = math.max(8, math.floor(W / (tf * 0.6 + 1)))
+    if B.fail then
+      txt(x0, y, 7, tf, "NO SIGNAL", ERR, 0, "\\b1\\fsp2")
+      local l = prompt.wrap(B.fail:upper(), math.floor(W / (u * 0.8 * 0.6 + 1)))
+      if l[1] then txt(x0, y + lh, 7, math.floor(u * 0.8), fit(l[1], cpl + 8), ERR, 0x30, "\\fsp1") end
+    elseif B.loaded then
+      local tl = prompt.wrap((mp.get_property("media-title", "") or ""):upper(), cpl)
+      for i = 1, math.min(2, #tl) do
+        txt(x0, y + (i - 1) * lh, 7, tf, (i == 2 and #tl > 2) and fit(tl[2] .. " ", cpl) or tl[i], "FFFFFF", 0, "\\fsp1")
+      end
+    else
+      txt(x0, y, 7, tf, "RESOLVING…", AMBER, blink and 0x10 or 0x70, "\\fsp2")
+    end
+    y = y + 2 * lh + math.floor(u * 0.5)
+    -- chips: LEN / FMT / SRC
+    local d = B.loaded and mp.get_property_number("duration") or nil
+    local len = (d and d > 0) and (d >= 3600 and string.format("%d:%02d:%02d", math.floor(d / 3600), math.floor(d % 3600 / 60), math.floor(d % 60))
+      or string.format("%d:%02d", math.floor(d / 60), math.floor(d % 60))) or nil
+    local vh = B.loaded and mp.get_property_number("height") or nil
+    local fps = vh and mp.get_property_number("container-fps") or nil
+    local fmt = vh and string.format("%dP%s", math.floor(vh), (fps and fps > 31) and tostring(math.floor(fps + 0.5)) or "") or nil
+    local chips = { { "LEN", len }, { "FMT", fmt }, { "SRC", B.clip and "CLIP" or "LINK" } }
+    local gap = math.max(4, math.floor(u * 0.5))
+    local chw, chh, cf = (W - 2 * gap) / 3, math.floor(u * 1.75), math.floor(u * 0.8)
+    for i, c in ipairs(chips) do
+      local a = x0 + (i - 1) * (chw + gap)
+      frame(a, y, a + chw, y + chh, c[2] and ACCENT or "FFFFFF", c[2] and 0x70 or 0xC8)
+      txt(a + u * 0.5, y + chh / 2, 4, cf, c[1], "FFFFFF", 0x88, "\\fsp1")
+      txt(a + chw - u * 0.5, y + chh / 2, 6, cf, c[2] or "--", c[2] and "FFFFFF" or "FFFFFF", c[2] and 0 or 0xA0, "\\fsp1")
+    end
+    y = y + chh + math.floor(u * 1.0)
+    -- gauges: SIGNAL (acquire, snaps full on LOCK) and BUFFER (live seconds)
+    local lf2 = math.floor(u * 0.85)
+    local labw = math.floor(7 * (lf2 * 0.6 + 2))
+    local valw = math.floor(6 * (lf2 * 0.6 + 2))
+    local gx0, gx1 = x0 + labw, x1 - valw
+    local gh = math.max(6, math.floor(u * 1.2))
+    local function gauge(gy, label, k, col, val, vcol, lead)
+      local n = 16
+      local seg = (gx1 - gx0) / n
+      local on, off = {}, {}
+      local lit = math.floor(math.max(0, math.min(1, k)) * n + 0.0001)
+      for i = 0, n - 1 do
+        local r = { gx0 + i * seg + t, gy, gx0 + (i + 1) * seg - t, gy + gh }
+        if i < lit then on[#on + 1] = r else off[#off + 1] = r end
+      end
+      rects("FFFFFF", 0xE4, off); rects(col, 0, on)
+      if lead and lit < n then box(gx0 + lit * seg + t, gy, gx0 + (lit + 1) * seg - t, gy + gh, col, blink and 0x30 or 0x90) end
+      txt(x0, gy + gh / 2, 4, lf2, label, "FFFFFF", 0x70, "\\fsp2")
+      txt(x1, gy + gh / 2, 6, math.floor(u * 1.0), val, vcol or col, 0, "\\b1\\fsp1")
+    end
+    if B.fail then gauge(y, "SIGNAL", 0, ERR, "LOST", ERR)
+    elseif ready then gauge(y, "SIGNAL", 1, ACCENT, "LOCK")
+    else
+      local k = B.loaded and 0.82 or 0.72 * (1 - math.exp(-el / 1.3))
+      gauge(y, "SIGNAL", k, AMBER, string.format("%.1fS", el), AMBER, true)
+    end
+    y = y + gh + math.floor(u * 1.25)
+    local buf = B.loaded and mp.get_property_number("demuxer-cache-duration") or nil
+    if buf then gauge(y, "BUFFER", buf / 30, buf < 3 and AMBER or ACCENT, string.format("%.0fS", buf))
+    else gauge(y, "BUFFER", 0, "FFFFFF", "--", "FFFFFF") end
+    y = y + gh + math.floor(u * 1.5)
+    -- annunciators: dim = off, amber = pending, jade = on (one white blink the tick it lights)
+    local th = math.floor(math.min(u * 5.6, yb - y))
+    if th < u * 2.6 then return end
+    local ty = yb - th
+    local tw = (W - 2 * gap) / 3
+    if not B.lit or B.lit.t0 ~= B.t0 then B.lit = { t0 = B.t0 } end
+    local rel, relbig
+    if B.fail or ph ~= "launch" then rel = { "off", "HOLD" }
+    elseif tgo and s >= tgo then rel = { "on", "GO" }
+    elseif s < B.cd then rel = { "pend", tostring(3 - math.min(2, math.floor(s / (B.cd / 3)))) }; relbig = true
+    else rel = { "pend", "WAIT" } end
+    local tiles = {
+      { "MASTER ARM", (ph == "launch" and not B.fail) and { "on", "ON" } or { "off", "SAFE" } },
+      { "SEEKER", B.fail and { "err", "LOST" } or ready and { "on", "LOCK" } or { "pend", "SRCH" } },
+      { "RELEASE", rel },
+    }
+    for i, tl in ipairs(tiles) do
+      local a, st = x0 + (i - 1) * (tw + gap), tl[2][1]
+      local b, c = a + tw, ty + th
+      if st == "on" and not B.lit[i] then B.lit[i] = T elseif st ~= "on" then B.lit[i] = nil end
+      local fl = st == "on" and B.lit[i] and T - B.lit[i] < 0.09
+      local lc, vc, va
+      if st == "on" then
+        box(a, ty, b, c, fl and CORE or ACCENT, 0); lc, vc, va = INK, INK, 0
+      elseif st == "pend" then
+        box(a, ty, b, c, AMBER, 0xD8); frame(a, ty, b, c, AMBER, 0); lc, vc, va = AMBER, AMBER, (relbig and i == 3) and 0 or (blink and 0 or 0x50)
+      elseif st == "err" then
+        box(a, ty, b, c, ERR, 0xD8); frame(a, ty, b, c, ERR, 0); lc, vc, va = ERR, ERR, 0
+      else
+        frame(a, ty, b, c, "FFFFFF", 0xC0); lc, vc, va = "FFFFFF", "FFFFFF", 0xA8
+      end
+      local mx = (a + b) / 2
+      local lfs = math.floor(math.min(u * 0.82, tw / (#tl[1] * 0.6 + 2.2)))
+      txt(mx, ty + u * 0.55, 8, lfs, tl[1], lc, st == "off" and 0x90 or 0, "\\fsp1")
+      local big = (relbig and i == 3) and math.floor(math.min(th * 0.55, u * 2.4)) or math.floor(math.min(u * 1.5, tw / 4.2))
+      txt(mx, ty + th * 0.62, 5, big, tl[2][2], vc, va, "\\b1\\fsp2")
+    end
+  end
+  function B.draw()
+    B.ov_ass = assdraw.ass_new(); B.tick()
+  end
+  function B.tick()
+    local w, h = mp.get_osd_size()
+    if not w or w <= 0 then return end
+    local ass, g, T = B.ov_ass, prompt.layout(w, h), mp.get_time()
+    local ph, fs, t = B.phase, g.fs, g.t
+    local s = B.freeze or (T - (ph == "launch" and B.tF or B.t0))   -- phase clock (freeze: tests)
+    local el = ph == "launch" and (T - B.t0) or s                  -- since the link started loading
+    local ready = B.tr ~= nil
+    local sx0, sy0, sx1, sy1 = g.sx0, g.sy0, g.sx1, g.sy1
+    local cx, cy = math.floor((sx0 + sx1) / 2), math.floor((sy0 + sy1) / 2)
+    local function box(x0, y0, x1, y1, col, al)
+      if x1 <= x0 or y1 <= y0 or al >= 255 then return end
+      ass:new_event()
+      ass:append(string.format("{\\an7\\pos(0,0)\\bord0\\shad0\\1c&H%s&\\1a&H%02X&\\p1}", col, al))
+      ass:draw_start(); ass:rect_cw(math.floor(x0), math.floor(y0), math.floor(x1), math.floor(y1)); ass:draw_stop()
+    end
+    local function brk(x0, y0, x1, y1, th, len, col, al)      -- four square corner brackets
+      box(x0, y0, x0 + len, y0 + th, col, al); box(x0, y0, x0 + th, y0 + len, col, al)
+      box(x1 - len, y0, x1, y0 + th, col, al); box(x1 - th, y0, x1, y0 + len, col, al)
+      box(x0, y1 - th, x0 + len, y1, col, al); box(x0, y1 - len, x0 + th, y1, col, al)
+      box(x1 - len, y1 - th, x1, y1, col, al); box(x1 - th, y1 - len, x1, y1, col, al)
+    end
+    local function txt(x, y, an, f, s_, col, al, extra)
+      ass:new_event()
+      ass:append(string.format("{\\an%d\\pos(%d,%d)\\fn%s\\fs%d\\bord0\\shad0\\q2\\1c&H%s&\\1a&H%02X&%s}%s",
+        an, x, y, MONO, f, col, al, extra or "", (s_:gsub("[{}\\]", ""))))
+    end
+    -- launch timeline: tgo = WEAPONS FREE (countdown done and the picture in), then the expand
+    local tgo = (ph == "launch" and ready) and math.max(B.cd, B.tr + CRT - B.tF) or nil
+    local e = 0
+    if tgo and s >= tgo + GO then
+      if not B.live then                          -- release: it plays from here on
+        B.live = true; mp.input_disable_section(SEC); B.akey = nil
+        mp.set_property_bool("pause", false); B.pub("play")
+      end
+      e = math.max(0, math.min(1, (s - tgo - GO) / REV))
+    end
+    local sm = e * e * (3 - 2 * e)
+    local function lerp(a, b) return math.floor(a + (b - a) * sm + 0.5) end
+    local hole = ready and { lerp(sx0, 0), lerp(sy0, 0), lerp(sx1, w), lerp(sy1, h) } or nil
+    if hole then B.margins(hole[1], hole[2], hole[3], hole[4], w, h) else B.margins(sx0, sy0, sx1, sy1, w, h) end
+    local blinkon = math.floor(T * 3) % 2 == 0
+    -- status lamp, bar, foot
+    local status, sc = "ARMED", AMBER
+    if B.fail then status, sc = "NO SIGNAL", ERR
+    elseif ph == "armed" and ready then status, sc = "TARGET LOCKED", ACCENT
+    elseif ph == "launch" then
+      if tgo and s >= tgo then status, sc = "WEAPONS FREE", ACCENT
+      elseif s >= B.cd then status, sc = "ACQUIRING", AMBER else status, sc = "ENGAGING", AMBER end
+    end
+    local url = (B.url or ""):gsub("^%a+://", ""):gsub("^www%.", "")
+    local room = math.max(8, math.floor((g.bx1 - g.bx0 - fs * 2.6) / (fs * 0.54)))
+    if #url > room then url = url:sub(1, room - 1) .. "…" end
+    local K, D = "FFFFFF", "FFFFFF"
+    local foot = B.fail and { { "ENTER", K, 0x30 }, { " RETRY    ", D, 0x98 }, { "ESC", K, 0x30 }, { " CLOSE", D, 0x98 } }
+      or ph == "armed" and { { "ENTER", K, 0x30 }, { " / ", D, 0x98 }, { "SPACE", K, 0x30 }, { " / ", D, 0x98 },
+        { "CLICK", K, 0x30 }, { " FIRE    ", D, 0x98 }, { "ESC", K, 0x30 }, { " ABORT", D, 0x98 } }
+      or { { "ESC", K, 0x30 }, { " ABORT", D, 0x98 } }
+    local scan = 0x90
+    if ph == "launch" then scan = math.min(255, 0x90 + math.floor(math.max(0, math.min(1, s / B.cd)) * 0x6F)) end
+    prompt.panel(ass, g, { fade = math.floor(255 * sm), hole = hole, fill = not ready, scan = scan,
+      lines = {}, bar = { { "› ", ACCENT, 0 }, { url, "FFFFFF", 0x20 } }, barcol = B.fail and ERR or ACCENT,
+      status = status, statcol = sc, lamp = (sc ~= AMBER or blinkon) and sc or nil, foot = e > 0 and nil or foot })
+    B.cluster(ass, g, math.floor(255 * sm), ph, s, el, ready, tgo, T)
+    if ready and T - B.tr < CRT and not B.freeze then B.crt(ass, g, T - B.tr) end
+    if e > 0 then                                  -- expanding: only the fading console
+      B.area(0, 0, 0, 0)
+      B.ov.res_x, B.ov.res_y, B.ov.data = w, h, ass.text
+      B.ov:update()
+      if e >= 1 and not B.freeze then B.finish() end
+      return
+    end
+    local sw, sh = sx1 - sx0, sy1 - sy0
+    if ph == "armed" or ph == "fail" then
+      if ready then box(sx0, sy0, sx1, sy1, INK, 0x78) end           -- preview dimmed under the button
+      local bw = math.floor(math.max(fs * 6, math.min(sw * 0.46, fs * 10)))
+      local bh = math.floor(math.max(fs * 2.4, math.min(sh * 0.36, fs * 3.8)))
+      local x0, y0 = cx - math.floor(bw / 2), cy - math.floor(bh / 2) + math.floor(fs * 0.3)
+      local x1, y1 = x0 + bw, y0 + bh
+      B.area(x0, y0, x1, y1)
+      local m = mp.get_property_native("mouse-pos")
+      local hov = m and m.hover and m.x >= x0 and m.x < x1 and m.y >= y0 and m.y < y1
+      local col = B.fail and AMBER or ACCENT
+      local br = 0.5 + 0.5 * math.sin(T * 4)                     -- slow breathing on the outer brackets
+      box(x0, y0, x1, y1, "070A06", 0x18)
+      box(x0, y0, x1, y1, col, hov and 0x98 or 0xD0)
+      local th = math.max(2, 2 * t)
+      box(x0, y0, x1, y0 + th, col, 0); box(x0, y1 - th, x1, y1, col, 0)
+      box(x0, y0 + th, x0 + th, y1 - th, col, 0); box(x1 - th, y0 + th, x1, y1 - th, col, 0)
+      local o = math.floor(th * 2 + br * th * 1.5)
+      brk(x0 - o, y0 - o, x1 + o, y1 + o, th, math.floor(fs * 0.9), col, math.floor(0x10 + (1 - br) * 0x60))
+      local f = math.floor(math.min(bh * 0.42, fs * 1.7))
+      txt(cx, math.floor((y0 + y1) / 2 - bh * 0.08), 5, f, B.fail and "RETRY" or "FIRE", hov and "FFFFFF" or CORE, 0,
+        string.format("\\b1\\fsp%d", math.floor(f * 0.3)))
+      txt(cx, math.floor(y1 - bh * 0.17), 5, math.floor(g.lf * 0.9), B.fail and "ENTER · CLICK" or "ENTER · SPACE · CLICK", "FFFFFF", 0x50, "\\fsp2")
+      local cap, cc = "TARGET LOCKED", ACCENT                     -- caption over the button: what is going on
+      if B.fail then cap, cc = "NO SIGNAL", ERR
+      elseif not ready then
+        local k = math.floor(T * 8) % 4
+        cap, cc = "ACQUIRING " .. ("■"):rep(k + 1) .. ("□"):rep(3 - k) .. string.format(" %.1fs", el), AMBER
+      end
+      txt(cx, y0 - o - math.floor(fs * 0.55), 2, g.lf, cap, cc, 0, "\\fsp3")
+    else                                           -- launch: reticle closes, bars arm, 3-2-1
+      B.area(0, 0, 0, 0)
+      local k = math.min(1, s / B.cd); k = 1 - (1 - k) ^ 2
+      if ready then box(sx0, sy0, sx1, sy1, INK, math.min(255, 0x78 + math.floor(k * 0x87))) end
+      local ix, iy = sw * 0.16, sh * 0.2                           -- target box half-size
+      local ox, oy = sw / 2 - fs * 0.6, sh / 2 - fs * 0.6
+      local hx, hy = ox + (ix - ox) * k, oy + (iy - oy) * k
+      local lock = s >= B.cd
+      if lock then hx = math.max(hx, sw * 0.38) end                 -- open wide around the final word
+      local th = math.max(2, 2 * t)
+      local rc = (tgo and s >= tgo) and CORE or (lock and AMBER or ACCENT)
+      brk(cx - hx, cy - hy, cx + hx, cy + hy, th, math.floor(fs * (1.3 - 0.5 * k)), rc, 0)
+      if not lock then                                             -- centre cross with a gap (countdown only)
+        local gap, arm = math.floor(fs * 0.5), math.floor(fs * 0.5)
+        box(cx - gap - arm, cy - t, cx - gap, cy + t, rc, 0x30); box(cx + gap, cy - t, cx + gap + arm, cy + t, rc, 0x30)
+        box(cx - t, cy - gap - arm, cx + t, cy - gap, rc, 0x30); box(cx - t, cy + gap, cx + t, cy + gap + arm, rc, 0x30)
+      end
+      local n, bw = 12, math.floor(sw * 0.5)                      -- arming bars along the screen foot
+      local seg = math.floor(bw / n)
+      local bx, by1 = cx - math.floor(seg * n / 2), sy1 - math.floor(fs * 0.7)
+      local by0 = by1 - math.max(4, math.floor(fs * 0.4))
+      local lit = math.floor(math.min(1, s / B.cd) * n + 0.0001)
+      local scanpos = (lock and not tgo) and math.floor(s * 10) % (2 * n - 2) or nil
+      if scanpos and scanpos >= n then scanpos = 2 * n - 2 - scanpos end
+      for i = 0, n - 1 do
+        local on = scanpos and math.abs(i - scanpos) <= 1 or (not scanpos and i < lit)
+        box(bx + i * seg + t, by0, bx + (i + 1) * seg - t, by1, on and (scanpos and AMBER or ACCENT) or "FFFFFF", on and 0 or 0xC8)
+      end
+      local big = math.floor(math.min(sh * 0.3, fs * 3.4))
+      if tgo and s >= tgo then
+        txt(cx, cy, 5, math.floor(big * 0.5), "WEAPONS FREE", CORE, 0, string.format("\\b1\\fsp%d", math.floor(big * 0.08)))
+      elseif lock then
+        txt(cx, cy - math.floor(fs * 0.2), 2, math.floor(big * 0.36), "STILL ACQUIRING", AMBER, blinkon and 0 or 0x40, "\\b1\\fsp4")
+        txt(cx, cy + math.floor(fs * 0.3), 8, g.lf, string.format("%.1fs", el), "FFFFFF", 0x30, "\\fsp2")
+      else
+        local step = B.cd / 3
+        local i = math.min(2, math.floor(s / step))
+        local u = (s - i * step) / step
+        local sc_ = math.floor(100 + 45 * (1 - u) ^ 3)
+        txt(cx, cy, 5, big, tostring(3 - i), CORE, math.floor(math.max(0, u - 0.75) / 0.25 * 0xC0),
+          string.format("\\b1\\fscx%d\\fscy%d", sc_, sc_))
+      end
+    end
+    if B.flash and T - B.flash < 0.12 then box(sx0, sy0, sx1, sy1, CORE, 0x90) end   -- the press: one white blink
+    B.ov.res_x, B.ov.res_y, B.ov.data = w, h, ass.text
+    B.ov:update()
+  end
+  function B.draw_card()   -- later loads (swap, playlist): the small loading card
+    local w, h = mp.get_osd_size()
+    if not w or w <= 0 then w, h = 960, 540 end
+    local fs = math.max(13, math.floor(h * 0.04))
+    local host = (mp.get_property("path", "") or ""):match("^%a+://([^/?#]+)") or ""
+    local function line(y, size, col, al, t)
+      return string.format("{\\an5\\pos(%d,%d)\\fn%s\\fs%d\\fsp2\\bord0\\shad0\\1c&H%s&\\1a&H%s&}%s\n",
+        math.floor(w / 2), y, MONO, size, col, al, t)
+    end
+    local cy = math.floor(h / 2)
+    B.ov.res_x, B.ov.res_y = w, h
+    B.ov.data = line(cy - fs, fs, ACCENT, "00", "ACQUIRING SIGNAL") ..
+      line(cy + math.floor(fs * 0.4), math.floor(fs * 0.7), "FFFFFF", "70", host:upper())
+    B.ov:update()
+  end
+  mp.register_event("start-file", function()
+    if B.on then return end                    -- redirect / playlist expansion / RETRY: same boot goes on
+    if not B.armed then B.card = true; B.draw_card(); return end
+    B.armed, B.on, B.tr, B.fail, B.loaded, B.mkey, B.live, B.flash = false, true, nil, nil, nil, nil, false, nil
+    B.t0, B.ts = mp.get_time(), {}
+    B.url = mp.get_property("path", "") or ""
+    B.plat = B.platform(B.url)
+    state.boot = true                          -- the HUD waits: it pops in when the picture is full size
+    mp.set_property_bool("pause", true)        -- preload paused: yt-dlp, demux and the first frame, silent
+    B.m0 = {}
+    for i = 1, 4 do B.m0[i] = mp.get_property_number(MR[i], 0) end
+    B.idle0 = mp.get_property("idle")
+    if B.idle0 ~= "yes" then mp.set_property("idle", "yes") end   -- a failed link shows NO SIGNAL, not a vanished window
+    mp.input_enable_section(SEC, "allow-hide-cursor")
+    B.cd = B.clip and CD or B.CDA
+    if B.clip then B.phase = "armed"; B.rate(0.1); B.draw() else B.launch() end
+  end)
+  mp.register_event("file-loaded", function() if B.on then B.loaded = true end end)
+  mp.register_event("playback-restart", function()
+    if B.card then B.card = false; B.ov:remove() end
+    if B.on and not B.tr and not B.fail then
+      B.tr = mp.get_time()
+      B.tf = B.tr - B.t0
+      B.ts.tf = B.tf; B.pub()
+    end
+  end)
+  mp.register_event("end-file", function(ev)
+    if B.card then B.card = false; B.ov:remove() end
+    if not B.on or ev.reason == "redirect" then return end
+    if ev.reason == "error" and not B.fail then
+      B.fail = (ev.file_error or "load failed"):upper()
+      B.phase, B.tr, B.live = "fail", nil, false
+      B.pub("fail"); B.rate(0.1); B.draw()
+    elseif not B.fail then B.stop() end
+  end)
+  mp.register_script_message("omaraptor-boot-freeze", function(v) B.freeze = tonumber(v); if B.on then B.draw() end end)
+end)()
+
+-- first-launch key card: shown once (state file), after the first picture of the first video.
+-- Any player key, a click, or 6 s dismisses it; "?" opens the full panel. No timers once shown.
+do
+  -- one local only (the main chunk is close to Lua's 200-local limit)
+  local card = { open = false, checked = false, to = nil, tries = 0, SECTION = "omaraptor-hud-card",
+    ov = mp.create_osd_overlay("ass-events") }
+  card.ov.z = 35
+  local base = os.getenv("XDG_STATE_HOME")
+  if not base or base == "" then base = (os.getenv("HOME") or "") .. "/.local/state" end
+  card.DIR = base .. "/omaraptor"
+  card.FILE = card.DIR .. "/first-launch-seen"
+  card.ROWS = {
+    { "SPACE / K", "play · pause" }, { "← →  /  J L", "5 s  /  10 s" }, { "↑ ↓   M", "volume · mute" },
+    { "0 – 9", "jump to 0–90 %" }, { "<  >", "speed" }, { "N", "night off · dim · dimmer" }, { "]", "next video" },
+    { "F   ESC", "fullscreen · exit" }, { "H", "arm panel" }, { "?", "all keys" },
+  }
+  function card.draw()
+    local w, h = mp.get_osd_size()
+    if not w or w <= 0 or h <= 0 then return end
+    local fs = math.max(9, math.floor(h * 0.0185))
+    local cw = math.floor(fs * 30)
+    if cw > w * 0.92 then fs = math.max(8, math.floor(w * 0.92 / 30)); cw = math.floor(fs * 30) end
+    local rh, head_h, foot_h = math.floor(fs * 1.6), math.floor(fs * 2.6), math.floor(fs * 2.2)
+    local chh = head_h + #card.ROWS * rh + foot_h + math.floor(fs * 0.6)
+    local x, y = math.floor((w - cw) / 2), math.floor((h - chh) / 2)
+    local bt, m = math.max(2, math.floor(fs * 0.12 + 0.5)), math.max(3, math.floor(fs * 0.35))
+    local function rect(x0, y0, x1, y1) return string.format("m %d %d l %d %d l %d %d l %d %d ", x0, y0, x1, y0, x1, y1, x0, y1) end
+    local out = {}
+    local function shp(col, al, d) out[#out + 1] = string.format("{\\an7\\pos(0,0)\\bord0\\shad0\\1c&H%s&\\1a&H%02X&\\p1}%s{\\p0}", col, al, d) end
+    local function txt(tx, ty, an, f, col, al, body, extra)
+      out[#out + 1] = string.format("{\\an%d\\pos(%d,%d)\\fn%s\\fs%d\\bord0\\shad0\\q2\\fsp0\\1c&H%s&\\1a&H%02X&%s}%s",
+        an, tx, ty, MONO, f, col, al, extra or "", body)
+    end
+    shp(INK, 0x18, rect(x, y, x + cw, y + chh))
+    shp(ACCENT, 0x00, rect(x, y, x + cw, y + bt) .. rect(x, y + chh - bt, x + cw, y + chh) ..
+      rect(x, y + bt, x + bt, y + chh - bt) .. rect(x + cw - bt, y + bt, x + cw, y + chh - bt) ..
+      rect(x - m, y - m, x + m, y + m) .. rect(x + cw - m, y - m, x + cw + m, y + m) ..
+      rect(x - m, y + chh - m, x + m, y + chh + m) .. rect(x + cw - m, y + chh - m, x + cw + m, y + chh + m))
+    local pad = math.floor(fs * 1.1)
+    txt(x + pad, y + math.floor(head_h * 0.5), 4, math.floor(fs * 1.05), ACCENT, 0, "KEYS", "\\b1\\fsp1")
+    txt(x + cw - pad, y + math.floor(head_h * 0.5), 6, math.floor(fs * 0.75), AMBER, 0, "FIRST LAUNCH", "\\fsp1")
+    shp(ACCENT, 0x90, rect(x + pad, y + head_h - 1, x + cw - pad, y + head_h))
+    local kx, dx = x + math.floor(cw * 0.39), x + math.floor(cw * 0.43)
+    for i, r in ipairs(card.ROWS) do
+      local ry = y + head_h + math.floor(fs * 0.3) + math.floor((i - 0.5) * rh)
+      txt(kx, ry, 6, fs, ACCENT, 0, r[1], "\\b1")
+      txt(dx, ry, 4, fs, "F0F0F0", 0x08, r[2])
+    end
+    txt(x + math.floor(cw / 2), y + chh - math.floor(foot_h * 0.55), 5, math.floor(fs * 0.72), "B4B4B4", 0x20,
+      "any key · click · 6 s to dismiss   ·   ? brings it back", "\\fsp1")
