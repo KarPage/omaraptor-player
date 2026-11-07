@@ -1,0 +1,147 @@
+    card.ov.res_x, card.ov.res_y, card.ov.data = w, h, table.concat(out, "\n")
+    card.ov:update()
+  end
+  function card.off()
+    if card.to then card.to:kill(); card.to = nil end
+    if not card.open then return end
+    card.open = false
+    mp.input_disable_section(card.SECTION)
+    card.ov:remove()
+    mp.set_property_native("user-data/omaraptor-hud-card", { open = false, file = card.FILE })
+  end
+  function card.raise()
+    if not card.open then return end
+    local w, h = mp.get_osd_size()
+    mp.set_mouse_area(0, 0, w or 10000, h or 10000, card.SECTION)
+    mp.input_disable_section(card.SECTION); mp.input_enable_section(card.SECTION)
+  end
+  function card.open_()
+    card.to = nil
+    if card.open or tips_open or prompt.open then return end
+    if state.boot then                            -- boot sequence still on screen: try again shortly
+      card.tries = card.tries + 1
+      if card.tries < 40 then card.to = mp.add_timeout(0.3, card.open_) end
+      return
+    end
+    mp.command_native({ name = "subprocess", args = { "mkdir", "-p", card.DIR }, playback_only = false,
+      capture_stdout = true, capture_stderr = true })
+    local f = io.open(card.FILE, "w")
+    if f then f:write(os.date("%Y-%m-%dT%H:%M:%S") .. "\n"); f:close() end
+    card.open = true
+    card.draw(); card.raise()
+    card.to = mp.add_timeout(6, card.off)
+    mp.set_property_native("user-data/omaraptor-hud-card", { open = true, file = card.FILE })
+  end
+  hud.card_off, hud.card_raise = card.off, card.raise
+  mp.add_key_binding(nil, "card-close", card.off)
+  mp.add_key_binding(nil, "card-esc", function() card.off(); mp.set_property_bool("fullscreen", false) end)
+  mp.add_key_binding(nil, "card-click", function(e) if e.event == "down" or e.event == "press" then card.off() end end, { complex = true })
+  mp.input_define_section(card.SECTION,
+    "MBTN_LEFT script-binding " .. me .. "/card-click\n" ..
+    "MBTN_LEFT_DBL script-binding " .. me .. "/nop\n" ..
+    "ESC script-binding " .. me .. "/card-esc\n", "force")
+  mp.register_event("playback-restart", function()
+    if card.checked then return end
+    card.checked = true
+    local f = io.open(card.FILE, "r")
+    if f then f:close(); return end               -- seen before: never again
+    card.to = mp.add_timeout(0.3, card.open_)
+  end)
+  mp.observe_property("osd-dimensions", "native", function() if card.open then card.draw(); card.raise() end end)
+end
+
+mp.register_script_message("omaraptor-hud", function(cmd, arg)
+  if hud.card_off and (cmd == "flash" or cmd == "key" or cmd == "resize" or cmd == "tips" or cmd == "card-off") then
+    hud.card_off()
+  end
+  if cmd == "card-off" then return end
+  if cmd == "key" then              -- input.conf keys that drive a bar tile: same action + press flash
+    if arg == "spd+" or arg == "spd-" then spd_step(arg == "spd+" and 1 or -1); press_flash("spd")
+    elseif actions[arg] then
+      local msg = actions[arg]()
+      press_flash(arg)
+      if msg then set_status(msg) end
+      show(1.2)
+    end
+    return
+  end
+  if cmd == "flash" then
+    if arg and arg ~= "" then mp.osd_message(arg, 0.8) end
+    state.hot = nil
+    show(1.2)
+  elseif cmd == "title" then        -- new video: show its title with the bar for a moment
+    -- the neon ticker carries the title now; plain OSD text only when it is off
+    if arg and arg ~= "" and (opts.title == "off" or not HUD()) then mp.osd_message(arg, 3) end
+    state.hot = nil
+    show(3)
+  elseif cmd == "resize" then
+    resize(arg and arg ~= "" and arg or "larger")
+  elseif cmd == "position" then
+    mp.osd_message("Controls: bottom bar", 0.8)
+    show(1.2)
+  elseif cmd == "tips" then
+    if arg == "open" then if not tips_open then open_tips() end
+    elseif arg == "close" then close_tips()
+    else toggle_tips() end
+  elseif cmd == "hide" then
+    hide(true)
+  elseif cmd == "vol-pin" then      -- preview: keep the volume graphic up (for screenshots)
+    volfx.pin = arg == "yes"; vol_pop()   -- unpin: normal hold + fade
+  elseif cmd == "title-pos" then    -- neon title placement: top | row | off
+    opts.title = arg; render()
+  elseif cmd == "title-demo" then   -- preview: override the title text ("" = media-title)
+    marquee.demo = (arg ~= "" and arg) or nil; marquee.t0 = mp.get_time(); render()
+  elseif cmd == "style" then        -- live switch between the three looks (design preview)
+    if STYLES[arg] then style = arg; render(); remfx.sync() end
+  elseif cmd == "hover" then        -- preview hooks: hover / press a button by name
+    state.hot = (arg ~= "" and arg) or nil; state.preview_x = nil; show(30); render()
+  elseif cmd == "scope-at" then     -- preview: freeze the scope animation at t seconds ("" = live)
+    fpm.freeze = tonumber(arg); if fpm.freeze then fpm.paused = mp.get_property_bool("pause") end; show(30); render()
+  elseif cmd == "hover-at" then     -- preview: pointer at "x y" (OSD px), hot = what is under it
+    local x, y = arg:match("^(%-?[%d.]+)%s+(%-?[%d.]+)$")
+    if x then state.mx, state.my, state.mhover = tonumber(x), tonumber(y), true; state.hot = hit(state.mx, state.my) end
+    show(30); render()
+  elseif cmd == "click-at" then     -- preview: a click at "x y" (same path as a real press)
+    local x, y = arg:match("^(%-?[%d.]+)%s+(%-?[%d.]+)$")
+    if x then
+      local m = { x = tonumber(x), y = tonumber(y), hover = true }
+      local real = mp.get_property_native
+      mp.get_property_native = function(p, d) if p == "mouse-pos" then return m end return real(p, d) end
+      ;(tips_open and tips_click or click)({ event = "press" }); mp.get_property_native = real
+    end
+  elseif cmd == "geom" then         -- preview: log a button's rect (and its cells) for tests
+    local r = state.buttons[arg]
+    if r then mp.msg.warn(string.format("geom %s %d %d %d %d cells=%s", arg, r.x, r.y, r.w, r.h,
+      r.cells and string.format("%d,%d,%d,%d", r.cells.x0, r.cells.cw, r.cells.gp, r.cells.y0) or "-")) end
+  elseif cmd == "hover-seek" then
+    state.hot = "seek"; state.preview_x = tonumber(arg); show(30); render()
+  elseif cmd == "press" then
+    press_flash(arg, true); show(30); render()
+  elseif cmd == "release" then
+    press_fx.name = nil; state.hot = nil; state.preview_x = nil; render()
+  elseif cmd == "status" then
+    if arg == "" then status.until_t = 0 else set_status(arg, 30) end; render()
+  elseif cmd == "prompt" then
+    if not prompt.open then open_prompt("") end
+  elseif cmd == "standby" then
+    hud.standby()
+  elseif cmd == "night" then
+    local keep = os.getenv("OMR_NIGHT_NOSAVE") ~= "1"
+    if arg == "off" or arg == "0" then hud.night_set(0, keep)
+    elseif arg == "dim" or arg == "1" then hud.night_set(1, keep)
+    elseif arg == "dimmer" or arg == "2" then hud.night_set(2, keep)
+    else hud.night_cycle() end
+  elseif cmd == "prompt-paste" then   -- same path as a real paste (used for testing)
+    if prompt.open and not on_pasted(arg) then
+      prompt.reopen = arg or ""; prompt.reopen_msg = "That isn't a web link. Copy a YouTube URL and paste it."
+      input.terminate()
+    end
+  end
+end)
+
+publish()
+mp.set_property("user-data/omaraptor-hud-api", "1")
+hud.night_eq()
+hud.night_draw()
+mp.observe_property("osd-dimensions", "native", function() if not hud.dead then hud.night_draw() end end)
+if hud.pin then mp.add_timeout(0.4, function() if not hud.dead then hud.apply_wpin(true); show() end end) end
