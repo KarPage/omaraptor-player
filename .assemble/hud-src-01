@@ -1,0 +1,498 @@
+-- omaraptor-hud: one-line control bar for the omaraptor mpv player, centered on the bottom edge.
+--
+--   [ -10s | > | +10s |  0:42 / 3:15  ====o--------  | VOL 80% | [-] [+] [FS] ]
+--
+--   -10s / play-pause / +10s, the time, a progress bar (click or drag to seek), the volume
+--   (click = mute), two window-size buttons (smaller / bigger, keeps 16:9) and a fullscreen
+--   toggle at the right end (expand corners when windowed, inward corners when fullscreen).
+--
+-- A single click on the video (outside the bar) plays / pauses; drag moves, double-click = fullscreen.
+-- Shows when the mouse moves over the video and stays up while paused; during playback it
+-- fades out ~7 s after the mouse stops (or at once when the mouse leaves). Clicks are only
+-- captured on the bar: everywhere else a left-drag still moves the window and a double-click
+-- still toggles fullscreen. The bar scales with the window and never covers the middle.
+--
+-- Options (~/.config/omaraptor/script-opts/omaraptor-hud.conf, or --script-opts=omaraptor-hud-KEY=VALUE):
+--   timeout=7        seconds without mouse movement before it fades out (while playing)
+--   accent=2EE6A6    RRGGBB accent colour (jade by default)
+--   size=1.0         overall scale
+--   pin=no           yes starts pinned on every workspace (P / the PIN tile toggles it)
+--   night=off        off | dim | dimmer (n / the NIGHT tile). The last level is written back.
+--
+-- Script messages (input.conf / IPC):
+--   script-message omaraptor-hud flash [label]
+--   script-message omaraptor-hud resize larger|smaller|cycle|small|medium|large
+--   script-message omaraptor-hud tips [open|close]   keyboard & mouse tips panel (also ? / h keys)
+--   script-message omaraptor-hud prompt              ask for a YouTube link (empty "new" windows)
+--
+-- The "?" square in the top-right corner (shown with the bar) opens the tips panel. Its list is
+-- read live from ~/.config/hypr/omaraptor.lua and this player's input.conf, so it stays accurate.
+-- The "+" square in the top-left corner opens another, empty omaraptor window ("omaraptor new"),
+-- which asks for a link: paste it (Super+V, Ctrl+V or Ctrl+Shift+V), Enter plays, Esc closes.
+
+local mp_opts = require "mp.options"
+-- fast assdraw: same output bytes as mp.assdraw (scale 4), but builds into a table and joins
+-- once (mp.assdraw re-copies the whole text on every coordinate: O(n^2) + heavy GC per frame)
+local assdraw
+do
+  local fmt, ceil, concat = string.format, math.ceil, table.concat
+  local A = {}
+  local MT = { __index = function(t, k)
+    if k == "text" then return concat(t.b, "", 1, t.n) end
+    return A[k]
+  end }
+  local function put(t, s) local n = t.n + 1; t.b[n] = s; t.n = n end
+  function A.append(t, s) if s ~= "" then put(t, s); t.any = true end end
+  function A.new_event(t) if t.any then put(t, "\n") end end
+  function A.draw_start(t) put(t, "{\\p4}"); t.any = true end
+  function A.draw_stop(t) put(t, "{\\p0}"); t.any = true end
+  function A.coord(t, x, y) put(t, fmt(" %d %d", ceil(x * 8), ceil(y * 8))); t.any = true end
+  function A.move_to(t, x, y) put(t, fmt(" m %d %d", ceil(x * 8), ceil(y * 8))); t.any = true end
+  function A.line_to(t, x, y) put(t, fmt(" l %d %d", ceil(x * 8), ceil(y * 8))); t.any = true end
+  function A.rect_cw(t, x0, y0, x1, y1)
+    local a, b, c, d = ceil(x0 * 8), ceil(y0 * 8), ceil(x1 * 8), ceil(y1 * 8)
+    put(t, fmt(" m %d %d l %d %d l %d %d l %d %d", a, b, c, b, c, d, a, d)); t.any = true
+  end
+  assdraw = { ass_new = function() return setmetatable({ b = {}, n = 0, any = false, scale = 4 }, MT) end }
+end
+local utils = require "mp.utils"
+
+local opts = { position = "bottom", timeout = 7, accent = "2EE6A6", size = 1.0, prompt = false, style = "f22", title = "top", eq = true,
+  light_mode = false, pin = false, night = "off" }   -- pin=yes: start pinned on every workspace; night=off|dim|dimmer; light_mode=yes: HUD LIGHT
+mp_opts.read_options(opts, "omaraptor-hud")
+local hud = { light = opts.light_mode and true or false, pin = opts.pin and true or false, dead = false }
+hud.night = ({ dim = 1, ["1"] = 1, dimmer = 2, ["2"] = 2 })[tostring(opts.night or "off"):lower()] or 0
+local function boot_ok(k) return not hud.boot or mp.get_time() - hud.boot >= k * 0.1 end   -- COMBAT power-on stagger
+
+local SECTION = "omaraptor-hud-input"
+local HELP_SECTION = "omaraptor-hud-help"    -- the "?" button (one mouse area per section)
+local TIPS_SECTION = "omaraptor-hud-tips"    -- whole window while the tips panel is open
+local NEW_SECTION = "omaraptor-hud-new"      -- the "+" button (new window)
+local TAPES = { htape = "omaraptor-hud-htape", vtape = "omaraptor-hud-vtape", ttape = "omaraptor-hud-ttape",  -- fullscreen tapes
+  spd = "omaraptor-hud-spd" }                -- SPEED box: same click routing plus wheel = speed step
+local SPD_STEPS = { 0.5, 0.75, 1, 1.25, 1.5, 1.75, 2 }   -- the 7 cells of the SPEED bar, left to right
+local FADE_STEPS, FADE_TIME = 4, 0.14   -- fast pop in / quick fade out (~140 ms)
+local OMARAPTOR = os.getenv("OMARAPTOR_BIN") or ((os.getenv("HOME") or "") .. "/.local/bin/omaraptor")
+
+local ov = mp.create_osd_overlay("ass-events")
+ov.z = 20   -- above the empty window's link panel
+hud.NIGHT_SECTION = "omaraptor-hud-night"
+hud.veil = mp.create_osd_overlay("ass-events")   -- night tint, under the HUD, does not fade with it
+hud.veil.z = 4
+local fpm = { t = -10, paused = false, timer = nil, ready = false }   -- f22 flight-path-marker flash
+-- REM countdown: interpolates time-pos between frames so the hundredths run smoothly while playing
+local remfx = { pos = nil, at = 0, timer = nil }
+mp.observe_property("time-pos", "number", function(_, v) remfx.pos = v; remfx.at = mp.get_time() end)
+local state = {
+  visible = false, fade = 0, buttons = {}, panel = nil, hot = nil, section_on = false,
+  dragging = false, last_seek = 0,
+  mx = nil, my = nil, grab_dy = 0, grab_box = false, drag_moved = false, seek_from = nil, seek_tgt = nil,
+}
+-- LIVE: yt-dlp says is_live for this URL (checked once per file + duration state), or a network
+-- stream with no duration. Live streams get no REM / NEXT countdown and no TIME tape.
+local live = { key = nil, on = false }
+local function is_live()
+  local path = mp.get_property("path")
+  if not path then return false end
+  local dur = mp.get_property_number("duration")
+  local key = path .. ((dur and dur > 0) and "|d" or "|n")
+  if live.key ~= key then
+    live.key, live.on = key, false
+    local r = mp.get_property_native("user-data/mpv/ytdl/json-subprocess-result")
+    local out = type(r) == "table" and type(r.stdout) == "string" and r.stdout or ""
+    if out:find('"is_live": true', 1, true) and out:find(path, 1, true) then live.on = true end
+  end
+  if live.on then return true end
+  local dur2 = mp.get_property_number("duration")
+  return (not dur2 or dur2 <= 0) and mp.get_property_bool("demuxer-via-network") == true
+    and mp.get_property_number("time-pos") ~= nil
+end
+local hide_timer, fade_timer, tick_timer
+-- audio signal meter: real levels from an astats filter (labelled @ytfeq) read via af-metadata
+-- lv = displayed level (fast attack, 36 dB/s release), pk = peak-hold cell (0.6 s, then falls 24 dB/s)
+local linkh = { t = 0 }                     -- BUFFER box history: cache seconds, sampled at 4 Hz
+local eq = { lv = { -90, -90, -90 }, pk = { -90, -90, -90 }, pkt = { 0, 0, 0 }, t = 0, have = false, timer = nil }
+
+-- colours ----------------------------------------------------------------------------------
+local function bgr(hex)
+  hex = tostring(hex):gsub("^#", "")
+  if not hex:match("^%x%x%x%x%x%x$") then hex = "2EE6A6" end
+  return hex:sub(5, 6) .. hex:sub(3, 4) .. hex:sub(1, 2)
+end
+local ACCENT = bgr(opts.accent)
+local PROG_STOPS = { { 0, ACCENT }, { 0.40, "FFFFFF" }, { 0.75, "5AA8C9" }, { 1, "4B64C8" } }   -- BGR: jade (accent), white, amber #C9A85A, rust #C8644B
+local function prog_col(f)                      -- progress colour, linear per BGR channel between stops
+  f = math.max(0, math.min(1, f or 0))
+  for i = 2, #PROG_STOPS do
+    local s0, s1 = PROG_STOPS[i - 1], PROG_STOPS[i]
+    if f <= s1[1] then
+      local t = (f - s0[1]) / (s1[1] - s0[1])
+      local out = ""
+      for k = 1, 5, 2 do
+        local c0, c1 = tonumber(s0[2]:sub(k, k + 1), 16), tonumber(s1[2]:sub(k, k + 1), 16)
+        out = out .. string.format("%02X", math.floor(c0 + (c1 - c0) * t + 0.5))
+      end
+      return out
+    end
+  end
+  return PROG_STOPS[#PROG_STOPS][2]
+end
+local function a(base)  -- ASS alpha (00 opaque .. FF clear), faded by state.fade; night pulls the HUD down a step
+  local v = 255 - math.floor((255 - base) * state.fade + 0.5)
+  local nk = hud.night or 0
+  if nk == 1 then v = v + math.floor((255 - v) * 0.14)
+  elseif nk == 2 then v = v + math.floor((255 - v) * 0.26) end
+  return string.format("%02X", math.max(0, math.min(255, v)))
+end
+
+local function fmt_time(t)
+  if not t or t < 0 then return "--:--" end
+  t = math.floor(t)
+  local hh, mm, ss = math.floor(t / 3600), math.floor(t / 60) % 60, t % 60
+  if hh > 0 then return string.format("%d:%02d:%02d", hh, mm, ss) end
+  return string.format("%d:%02d", mm, ss)
+end
+
+-- geometry ---------------------------------------------------------------------------------
+-- Three looks share one model (script-opts omaraptor-hud-style=edge|frame|segment, or
+-- "script-message omaraptor-hud style NAME" live): a full-width seek line on its own row, and
+-- under it one row of frosted square buttons: big transport centred (play largest), sound +
+-- readout left, size / fullscreen right. Hover = jade outline, press = jade flash.
+local STYLES = { f22 = true, hud = true, edge = true, frame = true, segment = true }
+local style = STYLES[opts.style] and opts.style or "f22"
+local function HUD() return style == "hud" or style == "f22" end   -- f22 = hud + cockpit instruments
+local function dtime(t)                     -- instrument digits: 07:48, 1:02:03
+  t = math.max(0, math.floor(t or 0))
+  local hh, mm, ss = math.floor(t / 3600), math.floor(t / 60) % 60, t % 60
+  if hh > 0 then return string.format("%d:%02d:%02d", hh, mm, ss) end
+  return string.format("%02d:%02d", mm, ss)
+end
+local MONO = "JetBrainsMono Nerd Font"
+local INK = "0D110B"             -- near-black
+local ERR = "757CE0"             -- soft red (E07C75), only for "not a link"
+local AMBER = "5AA8C9"          -- caution: muted soft amber #C9A85A (shared: REM <=30 %, paused scope cross, HOLD button, PAUSED)
+local TILE_GREEN, TILE_CORE, TILE_GRAY = "6AFF4D", "E0FFE6", "8C8C8C"   -- HUD tile: neon green #4DFF6A, core #E6FFE0, gray (BGR)
+local ALERT = "4848F0"          -- countdown critical: red #F04848
+local RUST = "4B64C8"           -- mute state: soft rust #C8644B (not alarm red)
+local RUST_CORE = "C8D2F5"      -- pale rust core for the neon MUTED
+local function idle_empty_now()
+  return mp.get_property_bool("idle-active") and (mp.get_property_number("playlist-count") or 0) == 0
+end
+
+-- status readout (replaces the corner OSD text for the bar's own actions)
+local status = { text = nil, until_t = 0 }
+local function set_status(s, secs) status.text = s; status.until_t = mp.get_time() + (secs or 0.9) end
+local function status_text()
+  if status.text and mp.get_time() < status.until_t then return status.text end
+  if mp.get_property_bool("pause") then return "PAUSED" end
+end
+
+-- press effect: a jade fill that fades out over FX seconds
+local FX = 0.15
+local press_fx, fx_timer = { name = nil, t = 0, hold = false }, nil
+local render
+-- frame limiter: every animation clock (REM, ticker, meter, scope, blink) asks for a frame via
+-- want(); they all share one render per ~40 ms instead of each drawing the whole HUD
+local frame = { t = -1, pend = nil }
+local function want()
+  if frame.pend then return end
+  local dt = mp.get_time() - frame.t
+  if dt >= 0.036 then render(); return end
+  frame.pend = mp.add_timeout(0.04 - dt, function()
+    frame.pend = nil
+    if mp.get_time() - frame.t >= 0.03 then render() end
+  end)
+end
+local function press_flash(name, hold)
+  press_fx.name, press_fx.t, press_fx.hold = name, mp.get_time(), hold or false
+  if fx_timer then fx_timer:kill(); fx_timer = nil end
+  if hold then return end
+  fx_timer = mp.add_periodic_timer(1 / 60, function()
+    if mp.get_time() - press_fx.t > FX + 0.03 then
+      fx_timer:kill(); fx_timer = nil; press_fx.name = nil
+    end
+    render()
+  end)
+end
+local function fx_k(name)
+  if press_fx.name ~= name then return 0 end
+  if press_fx.hold then return 1 end
+  return math.max(0, 1 - (mp.get_time() - press_fx.t) / FX)
+end
+
+local function layout(w, h)
+  local FSM = style == "f22" and mp.get_property_bool("fullscreen")   -- fullscreen cockpit
+  local u = math.floor(math.max(20, math.min(38, h * 0.075)) * opts.size + 0.5)  -- button square
+  if FSM then u = math.floor(math.max(38, math.min(88, h * 0.042)) * opts.size + 0.5) end  -- ~2x, resolution-aware
+  local g = math.max(4, math.floor(u * 0.22 + 0.5))
+  local fs = math.max(10, math.floor(u * 0.48 + 0.5))
+  local t = math.max(1, math.floor(u / 32 + 0.5))                                  -- hairline
+  local st = math.max(2, math.floor(u * 0.07 + 0.5))                               -- seek line
+  local bottom = math.max(20, math.floor(h * (FSM and 0.055 or 0.04)))   -- safe margins
+  local side = math.max(20, math.floor(w * (FSM and 0.045 or 0.03)))
+  local cs = math.floor(u * 0.9)
+  local b = {}
+  b.new = { x = side, y = bottom, w = cs, h = cs }
+  b.help = { x = w - side - cs, y = bottom, w = cs, h = cs }
+  local nw = cs
+  if w >= 1100 then nw = math.floor(cs * 4.2)
+  elseif w >= 520 then nw = math.max(96, math.floor(cs * 4.8)) end
+  if nw < cs then nw = cs end
+  local nx = b.help.x - math.max(4, g) - nw
+  if nx >= b.new.x + cs + math.max(4, g) then
+    b.night = { x = nx, y = b.help.y, w = nw, h = cs }
+  end
+  local p = { u = u, g = g, fs = fs, t = t, st = st, x = 0, y = 0, w = 0, h = 0, FS = FSM, side = side, bottom = bottom }
+  if idle_empty_now() then return p, b end          -- empty "new" window: corner buttons only
+  local boxed = style == "frame" or HUD()
+  local pad = boxed and math.floor(u * 0.45) or 0
+  local cx0, cx1
+  if HUD() then
+    cx0, cx1 = side + pad, w - side - pad
+  elseif style == "frame" then
+    local pw = math.min(w - 2 * side, math.max(math.floor(w * 0.84), u * 14))
+    cx0 = math.floor((w - pw) / 2) + pad; cx1 = cx0 + pw - 2 * pad
+  else
+    cx0, cx1 = side, w - side
+  end
+  -- transport centred and large (play largest); sound + readout left, size + fullscreen right
+  local P, T, S = math.floor(u * 1.75), math.floor(u * 1.3), math.floor(u * 0.82)
+  local by = h - bottom - pad - P                   -- top of the button row
+  local cy = by + P / 2
+  local tg = math.floor(g * 1.2) + (style == "f22" and math.floor(P * 0.24) or 0)   -- f22: room for the dial rings
+  local cxm = math.floor((cx0 + cx1) / 2)
+  local px = cxm - math.floor(P / 2)
+  b.play = { x = px, y = by, w = P, h = P }
+  b.back = { x = px - tg - T, y = math.floor(cy - T / 2), w = T, h = T }
+  b.fwd = { x = px + P + tg, y = math.floor(cy - T / 2), w = T, h = T }
+  local lab = 0
+  if HUD() and math.floor(fs * 0.78) >= 13 then lab = math.floor(fs * 0.78) end   -- under-labels only when they stay readable
+  local sy0 = math.floor(cy - (S + lab) / 2)
+  p.laby = sy0 + S + math.floor(lab * 0.55)
+  local lgap = boxed and 0 or math.floor(g * 0.8)
+  local room_l = b.back.x - g * 2 - cx0
+  local volw = style == "f22" and S or math.floor(S * 2.1)   -- f22: the speaker is the MUTE softkey
+  local EQ = opts.eq and not hud.light                -- LIGHT: no signal meter (plain MUTE key + VOL slider)
+  if style == "f22" and EQ and room_l - math.floor(S * 3.2) >= u * 7 then
+    volw = math.floor(S * 3.2)                    -- f22 + eq: the MUTE softkey is the live signal meter
+  end
+  local room_r = cx1 - (b.fwd.x + T) - g * 2
+  local right = { "smaller", "larger", "fs" }
+  if style == "f22" then right = { "pin", "hud", "smaller", "larger", "fs" } end   -- PIN + HUD + size + FS
+  -- Match the -10 / +10 key height when the row allows it. A few px of gap keeps five
+  -- squares from fusing. If they still will not fit, drop size, then PIN, before shrinking
+  -- a key under a tappable size. Labels collapse later; the hit target does not.
+  local rgap = math.max(lgap, style == "f22" and 3 or lgap)
+  local rs = math.min(T, math.max(S, math.floor(u * 1.2)))
+  local function right_w(n, sz) return n * sz + math.max(0, n - 1) * rgap end
+  while rs > S and right_w(#right, rs) > room_r do rs = rs - 1 end
+  if right_w(#right, rs) > room_r then right = style == "f22" and { "pin", "hud", "fs" } or { "fs" } end
+  while rs > math.max(18, math.floor(S * 0.9)) and right_w(#right, rs) > room_r do rs = rs - 1 end
+  if right_w(#right, rs) > room_r then right = style == "f22" and { "hud", "fs" } or { "fs" } end
+  while rs > 16 and right_w(#right, rs) > room_r do rs = rs - 1 end
+  p.rs = rs
+  if volw > room_l then volw = S end
+  b.vol = { x = cx0, y = sy0, w = volw, h = S }
+  p.hero = nil
+  if style == "f22" and EQ and room_l >= u * 8 then
+    -- hero left zone: [ signal meter = MUTE key ]  G  [ VOL slider box ]  G  [ -10 ], all T tall
+    local G = math.max(g * 2, math.floor(u * 0.36))
+    local L = b.back.x - G - cx0
+    local mw = math.floor((L - G) * 0.6)
+    b.vol = { x = cx0, y = b.back.y, w = mw, h = T }
+    p.hero = { x = cx0 + mw + G, y = b.back.y, w = L - G - mw, h = T, G = G }
+    volw = mw
+  end
+  p.mid = { x = cx0 + volw + g, w = math.max(0, room_l - volw - g), cy = HUD() and sy0 + S / 2 or cy }
+  local x = cx1
+  for i = #right, 1, -1 do
+    local k = right[i]
+    local ry = math.floor(cy - rs / 2)
+    if ry + rs > h - 4 then ry = h - 4 - rs end
+    x = x - rs; b[k] = { x = x, y = ry, w = rs, h = rs }; x = x - rgap
+  end
+  local sy = by - math.floor(u * 0.55)              -- seek row, above the buttons
+  if style == "f22" then sy = sy - math.floor(fs * 1.2) end   -- room for the chrono scale numbers
+  local lx0, lx1 = cx0, cx1
+  if style == "edge" then                           -- times at the two ends of the line
+    local tw = math.floor(#fmt_time(mp.get_property_number("duration")) * fs * 0.62)
+    p.tl, p.tr = { x = cx0, y = sy }, { x = cx1, y = sy }
+    lx0, lx1 = cx0 + tw + g, cx1 - tw - g
+  end
+  b.seek = { x = lx0, y = sy - math.floor(u * 0.32), w = lx1 - lx0, h = math.floor(u * 0.64), cy = sy }
+  local top = sy - math.floor(u * 0.45)
+  if boxed then top = sy - pad - math.floor(u * 0.15) end
+  if HUD() then top = top - math.floor(fs * (style == "f22" and 2.0 or 1.3)) end   -- room for the digital readout
+  p.tth = 0
+  if style == "f22" then
+    local nb, hb = b.new, b.help
+    p.nav = { x0 = nb.x + nb.w + g * 2, x1 = (b.night and b.night.x or hb.x) - g * 2, y0 = nb.y, h = nb.h }
+    p.nav.dy = nb.y + nb.h + math.floor(fs * 0.85)           -- data line under the title strip
+    local lf, lh = math.floor(fs * 0.7), math.floor(S * 0.66)
+    local ly = math.floor(sy0 + (S - lh) / 2)
+    p.lf = lf
+    local gx0, gx1 = b.vol.x + b.vol.w + g, b.back.x - g * 2   -- VOL gauge: click / drag sets volume
+    local gw = math.min(gx1 - gx0, math.floor(u * 4))
+    if p.hero then                                  -- slider track inside the VOL box (lower half)
+      local hb, ip = p.hero, math.max(4, math.floor(T * 0.14))
+      local tw = math.floor(T * 0.2)
+      p.hero.ip, p.hero.hh = ip, math.floor(fs * 1.05)
+      b.vgauge = { x = hb.x + ip + tw, y = hb.y + ip + p.hero.hh, w = hb.w - 2 * (ip + tw), h = hb.h - 2 * ip - p.hero.hh }
+      local cap = math.floor(fs * 0.95)               -- meter: letter column + caption strip
+      p.eq = { x = b.vol.x + ip + math.floor(fs * 0.9), y = b.vol.y + ip, w = b.vol.w - 2 * ip - math.floor(fs * 0.9),
+        h = T - 2 * ip - cap, cap = cap, lx = b.vol.x + ip, big = true, tile = b.vol }
+    elseif gw > u * 1.6 then b.vgauge = { x = gx0, y = ly, w = gw, h = lh } end
+    if p.hero then
+    elseif EQ and b.vol.w > S then                 -- signal meter inset inside the MUTE tile
+      local ip = math.max(3, math.floor(S * 0.16))
+      p.eq = { x = b.vol.x + ip, y = b.vol.y + ip, w = b.vol.w - 2 * ip, h = S - 2 * ip }
+    end
+    p.rhero = nil
+    if p.hero then           -- right zone mirrors the left: [SPD][REPEAT][BUFFER][SIZE - + FS], all T tall
+      local G, ip = p.hero.G, p.hero.ip
+      local xr0, xr1 = b.fwd.x + T + G, cx1
+      local cap = 0                                         -- words sit inside the keys, not under them
+      local gi = math.max(4, math.floor(u * 0.16))
+      local bs = T - 4                                     -- same height as SPEED / REPEAT / LINK
+      if bs < 20 then bs = 20 end
+      local gw2 = 5 * bs + 4 * gi + 2 * ip + 4           -- PIN + HUD + SIZE - + + FS
+      local R = xr1 - xr0 - gw2 - 3 * G
+      if R < u * 5 then
+        bs = math.floor((xr1 - xr0 - 3 * G - u * 5 - 2 * ip - 4 - 4 * gi) / 5)
+        if bs > T - 4 then bs = T - 4 end
+        if bs < 20 then bs = 20 end
+        gw2 = 5 * bs + 4 * gi + 2 * ip + 4
+        R = xr1 - xr0 - gw2 - 3 * G
+      end
+      if R >= u * 5 then
+        local ws, wl = math.floor(R * 0.37), math.floor(R * 0.24)
+        local wb = R - ws - wl
+        local y0 = b.fwd.y
+        b.spd = { x = xr0, y = y0, w = ws, h = T }
+        b.loop = { x = xr0 + ws + G, y = y0, w = wl, h = T }
+        b.link = { x = b.loop.x + wl + G, y = y0, w = wb, h = T }; p.link = b.link
+        local gx = b.link.x + wb + G
+        p.rgrp = { x = gx, y = y0, w = xr1 - gx, h = T, ip = ip, cap = cap }
+        local bx = gx + math.floor((xr1 - gx - (5 * bs + 4 * gi)) / 2)
+        local byy = y0 + math.floor((T - bs) / 2)
+        b.pin = { x = bx, y = byy, w = bs, h = bs }; bx = bx + bs + gi
+        b.hud = { x = bx, y = byy, w = bs, h = bs }; bx = bx + bs + gi
+        b.smaller = { x = bx, y = byy, w = bs, h = bs }
+        b.larger = { x = bx + bs + gi, y = byy, w = bs, h = bs }
+        b.fs = { x = bx + 2 * (bs + gi), y = byy, w = bs, h = bs }
+        p.rhero = { ip = ip }
+      end
+    end
+    local function lw(txt) return math.floor(#txt * lf * 0.62 + lf * 1.3) end
+    local x, xmax = b.fwd.x + T + g * 2, (b.pin or b.hud or b.smaller or b.fs).x - g * 2
+    if p.rhero or hud.light then xmax = x - 1 end   -- boxes already placed / LIGHT: no SPD LOOP LINK lamps
+    for _, it in ipairs({ { "spd", "SPD 1.00x" }, { "loop", "LOOP" } }) do
+      local wv = lw(it[2])
+      if x + wv <= xmax then b[it[1]] = { x = x, y = ly, w = wv, h = lh }; x = x + wv + g end
+    end
+    local wl = lw("LINK 00s") + lf
+    if not p.rhero and x + wl <= xmax then p.link = { x = x, y = ly, w = wl, h = lh }; b.link = p.link end   -- press: BUFFER popup
+  end
+  if FSM and p.nav and not hud.light then                 -- fullscreen instruments (FULL only)
+    local tw = math.floor(math.min(w * 0.42, u * 16))
+    local hy = p.nav.dy + math.floor(fs * 0.9)
+    b.htape = { x = math.floor((w - tw) / 2), y = hy, w = tw, h = math.floor(u * 1.25) }   -- fine-seek heading tape
+    local ty0, ty1 = b.htape.y + b.htape.h + u, top - u
+    local tw2 = math.floor(u * 0.9)
+    if ty1 - ty0 > u * 4 then
+      b.vtape = { x = side + math.floor(u * 0.2), y = ty0, w = tw2, h = ty1 - ty0 }               -- VOL (airspeed)
+      b.ttape = { x = w - side - math.floor(u * 0.2) - tw2, y = ty0, w = tw2, h = ty1 - ty0 }   -- REM (altitude, countdown) / LIVE tape
+      -- grab areas: column + pointer box + padding, so the box itself is draggable
+      local pbh, pad = math.floor(fs * 1.6), math.floor(u * 0.5)
+      local vb = b.vtape
+      local vx0 = math.max(0, vb.x - pad)
+      local vx1 = vb.x + vb.w + 2 + math.floor(pbh * 0.35) + math.floor(fs * 3.0) + pad
+      vb.grab = { x = vx0, y = vb.y - pbh, w = vx1 - vx0, h = vb.h + 2 * pbh }
+      local tb = b.ttape
+      if tb then
+        local tx0 = tb.x - 2 - math.floor(pbh * 0.35) - math.floor(fs * 6.6) - pad
+        tb.grab = { x = tx0, y = tb.y - pbh, w = math.min(w, tb.x + tb.w + pad) - tx0, h = tb.h + 2 * pbh }
+      end
+    end
+  end
+  if style == "f22" and opts.title ~= "off" then         -- f22: the title is the top HUD data line
+    p.title = { x0 = p.nav.x0 + math.floor(u * 0.4), x1 = p.nav.x1 - math.floor(u * 0.4),
+      cy = p.nav.y0 + math.floor(p.nav.h / 2), fs = math.floor(fs * 1.1), an = 5 }
+  elseif HUD() and opts.title == "top" then      -- (a) neon title row above the readout
+    p.tth = math.floor(fs * 1.75)
+    top = top - p.tth
+    p.title = { x0 = cx0 + math.floor(u * 1.2), x1 = cx1 - math.floor(u * 1.2), cy = top + math.floor(u * 0.3 + fs * 0.75), fs = math.floor(fs * 1.3), an = 5 }
+  elseif HUD() and opts.title == "row" then  -- (b) neon title in the button row, left of -10
+    local x0 = cx0 + volw + g * 2
+    local x1 = b.back.x - g * 2
+    if x1 - x0 > fs * 3 then
+      p.title = { x0 = x0, x1 = x1, cy = math.floor(cy), fs = math.floor(fs * 1.1), an = 4 }
+    end
+  end
+  if b.seek then
+    local seek_bot = b.seek.y + b.seek.h + 2
+    for _, k in ipairs({ "pin", "hud", "smaller", "larger", "fs" }) do
+      local r = b[k]
+      if r and r.y < seek_bot then
+        local nh = h - 4 - seek_bot
+        if nh < 16 then nh = 16 end
+        if r.h > nh then r.h, r.w = nh, nh end
+        r.y = seek_bot
+        if r.y + r.h > h - 2 then r.y = h - 2 - r.h end
+      end
+    end
+  end
+  p.x, p.y = cx0 - pad, top
+  p.w, p.h = (cx1 + pad) - p.x, (by + P + pad) - top
+  p.cx0, p.cx1, p.sy, p.by = cx0, cx1, sy, by
+  return p, b
+end
+
+-- drawing ----------------------------------------------------------------------------------
+-- sparse shapes: libass rasterises (and mpv re-uploads on every redraw) each drawing event as ONE
+-- bitmap the size of its bounding box (and mpv re-blends/uploads it on every redraw), so a hollow
+-- 1 px screen frame costs a full-screen bitmap. shape() records the strokes; when every vertex is
+-- on a whole pixel, strokes whose boxes don't overlap become their own event (no shared pixels, so
+-- the same pixels at a fraction of the bitmap area). Only when it saves >= 40k px of bitmap.
+local shape
+do
+  local ceil, fmt, concat, min, max = math.ceil, string.format, table.concat, math.min, math.max
+  local P, n, cur, frac = {}, 0, nil, false
+  local R = {}
+  local function newp(s, x, y) n = n + 1; local p = P[n] or {}; P[n] = p
+    p.s, p.k, p.x0, p.y0, p.x1, p.y1 = { s }, 1, x, y, x, y; cur = p
+    if x % 8 ~= 0 or y % 8 ~= 0 then frac = true end
+    return p end
+  local function grow(p, x, y)
+    if x % 8 ~= 0 or y % 8 ~= 0 then frac = true end
+    if x < p.x0 then p.x0 = x elseif x > p.x1 then p.x1 = x end
+    if y < p.y0 then p.y0 = y elseif y > p.y1 then p.y1 = y end
+  end
+  function R.move_to(_, x, y) local a, b = ceil(x * 8), ceil(y * 8); newp(fmt(" m %d %d", a, b), a, b) end
+  function R.line_to(_, x, y)
+    local a, b = ceil(x * 8), ceil(y * 8)
+    local p = cur; p.k = p.k + 1; p.s[p.k] = fmt(" l %d %d", a, b); grow(p, a, b)
+  end
+  function R.rect_cw(_, x0, y0, x1, y1)
+    local a, b, c, d = ceil(x0 * 8), ceil(y0 * 8), ceil(x1 * 8), ceil(y1 * 8)
+    local p = newp(fmt(" m %d %d l %d %d l %d %d l %d %d", a, b, c, b, c, d, a, d), a, b); grow(p, c, d)
+  end
+  local par = {}
+  local function find(i) while par[i] ~= i do par[i] = par[par[i]]; i = par[i] end; return i end
+  shape = function(ass, color, alpha, fn, bord, bcolor, balpha)
+    local head = string.format("{\\an7\\pos(0,0)\\shad0\\bord%s\\1c&H%s&\\1a&H%s&\\3c&H%s&\\3a&H%s&}",
+      bord or 0, color, a(alpha), bcolor or color, a(balpha or 255))
+    n, cur, frac = 0, nil, false
+    fn(R)
+    local groups = 1
+    local big = false
+    if n > 1 and n <= 64 and not frac and (tonumber(bord) or 0) == 0 then
+      local X0, Y0, X1, Y1 = 1e9, 1e9, -1e9, -1e9
+      for i = 1, n do local p = P[i]
+        X0, Y0, X1, Y1 = min(X0, p.x0), min(Y0, p.y0), max(X1, p.x1), max(Y1, p.y1) end
+      big = (X1 - X0) * (Y1 - Y0) >= 64 * 80000              -- only big shapes can save 40k px
+    end
+    if big then
+      -- whole-pixel fills: join only boxes that overlap (touching edges share no pixel)
+      for i = 1, n do par[i] = i end
+      for i = 1, n do
