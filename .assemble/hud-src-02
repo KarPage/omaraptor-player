@@ -1,1 +1,512 @@
-PLACEHOLDER
+        local p = P[i]
+        for j = i + 1, n do
+          local q = P[j]
+          if p.x0 < q.x1 and q.x0 < p.x1 and p.y0 < q.y1 and q.y0 < p.y1 then
+            local ri, rj = find(i), find(j); if ri ~= rj then par[rj] = ri end
+          end
+        end
+      end
+      groups = 0
+      local X0, Y0, X1, Y1, area = 1e9, 1e9, -1e9, -1e9, 0
+      for i = 1, n do
+        local r = find(i)
+        local p = P[i]
+        X0, Y0, X1, Y1 = min(X0, p.x0), min(Y0, p.y0), max(X1, p.x1), max(Y1, p.y1)
+        if r == i then groups = groups + 1 end
+      end
+      if groups > 12 then groups = 1 end                 -- many tiny strips: event count wins
+      if groups > 1 then
+        -- per-group bbox area vs the whole bbox: only split when it actually saves bitmap area
+        local gb = {}
+        for i = 1, n do
+          local r, p = find(i), P[i]
+          local b = gb[r]
+          if not b then gb[r] = { p.x0, p.y0, p.x1, p.y1 } else
+            b[1], b[2], b[3], b[4] = min(b[1], p.x0), min(b[2], p.y0), max(b[3], p.x1), max(b[4], p.y1) end
+        end
+        for _, b in pairs(gb) do area = area + (b[3] - b[1] + 16) * (b[4] - b[2] + 16) end
+        local whole = (X1 - X0 + 16) * (Y1 - Y0 + 16)
+        if area * 2 > whole or whole - area < 64 * 40000 then groups = 1 end  -- split only for >= 40k px saved
+      end
+    end
+    if groups == 1 then
+      ass:new_event(); ass:append(head); ass:draw_start()
+      for i = 1, n do ass:append(concat(P[i].s, "", 1, P[i].k)) end
+      ass:draw_stop()
+      return
+    end
+    for i = 1, n do
+      if find(i) == i then
+        ass:new_event(); ass:append(head); ass:draw_start()
+        for j = i, n do if find(j) == i then ass:append(concat(P[j].s, "", 1, P[j].k)) end end
+        ass:draw_stop()
+      end
+    end
+  end
+end
+local function mtext(ass, x, y, size, color, alpha, s, an, extra)
+  ass:new_event()
+  ass:append(string.format("{\\an%d\\pos(%d,%d)\\fn%s\\fs%d\\bord0\\shad0\\1c&H%s&\\1a&H%s&\\fsp0%s}%s",
+    an or 5, x, y, MONO, size, color, a(alpha), extra or "", s))
+end
+-- status icon for the centre readout, drawn inline in the same text event (no extra event):
+-- PLAYING = a small solid play triangle, PAUSED = two thin bars; ~ the old square glyph's size
+local function st_icon(size, paused)
+  local q = math.max(5, math.floor(size * 0.56 + 0.5))
+  local d
+  if paused then
+    local bw = math.max(1, math.floor(q * 0.26 + 0.5)); local g = math.max(2, q - 2 * bw - math.floor(q * 0.2))
+    d = string.format("m 0 0 l %d 0 l %d %d l 0 %d m %d 0 l %d 0 l %d %d l %d %d", bw, bw, q, q, bw + g, 2 * bw + g, 2 * bw + g, q, bw + g, q)
+  else
+    local tw = math.floor(q * 0.88 + 0.5)
+    d = string.format("m 0 0 l %d %d l 0 %d", tw, math.floor(q / 2), q)
+  end
+  return string.format("{\\p1\\pbo%d}%s{\\p0} ", -math.floor(size * 0.04 + 0.5), d)
+end
+-- info line under the title: muted amber #C9A85A labels, a brighter amber for values, and a very
+-- soft low-alpha deep-amber glow (#302414, blurred border on the same text event, no extra events):
+-- legible on bright sky, reads as a faint warm halo on dark footage
+local INFO_LBL, INFO_VAL = "5AA8C9", "7CC4DE"
+local function info_glow(fs, sp)
+  return string.format("\\fsp%d\\bord%.1f\\blur%.1f\\3c&H142430&\\3a&H60&", sp or 1, math.max(1.5, fs * 0.16), math.max(2, fs * 0.24))
+end
+-- SPEED bar cell under (x, y): the whole column below the header counts, so each cell is a tall,
+-- easy target; nil on the header (label / value) row
+local function spd_cell_at(r, x, y)
+  local c = r and r.cells
+  if not (c and x and y) or y < c.y0 then return nil end
+  local i = math.floor((x - c.x0 + c.gp / 2) / (c.cw + c.gp)) + 1
+  return math.max(1, math.min(c.n, i))
+end
+local function C(col, al) return string.format("{\\1c&H%s&\\1a&H%s&}", col, a(al)) end
+local function tri(d, x1, y1, x2, y2, x3, y3) d:move_to(x1, y1); d:line_to(x2, y2); d:line_to(x3, y3) end
+local function outline(d, x, y, w, h, t)
+  d:rect_cw(x, y, x + w, y + t); d:rect_cw(x, y + h - t, x + w, y + h)
+  d:rect_cw(x, y + t, x + t, y + h - t); d:rect_cw(x + w - t, y + t, x + w, y + h - t)
+end
+local function ticks(d, x, y, w, h, t, l)          -- four corner L marks
+  d:rect_cw(x, y, x + l, y + t); d:rect_cw(x, y, x + t, y + l)
+  d:rect_cw(x + w - l, y, x + w, y + t); d:rect_cw(x + w - t, y, x + w, y + l)
+  d:rect_cw(x, y + h - t, x + l, y + h); d:rect_cw(x, y + h - l, x + t, y + h)
+  d:rect_cw(x + w - l, y + h - t, x + w, y + h); d:rect_cw(x + w - t, y + h - l, x + w, y + h)
+end
+
+-- the square around a button: frosted glass (layered translucent fill, lighter top half,
+-- faint inner highlight) + hairline outline; returns the colour / alpha for its glyph
+local function chrome(ass, p, name, r, on)
+  local hot, k = state.hot == name, fx_k(name)
+  local ON = (name == "vol" and on) and RUST or ACCENT   -- muted speaker / MUTE softkey lights rust
+  if name == "play" and on and style == "f22" and mp.get_property_bool("pause") then ON = AMBER end  -- HOLD = amber
+  local x0, y0, x1, y1 = r.x, r.y, r.x + r.w, r.y + r.h
+  local t = p.t
+  shape(ass, INK, 0x78, function(d) d:rect_cw(x0, y0, x1, y1) end)                 -- dark glass body
+  shape(ass, "FFFFFF", 0xEE, function(d) d:rect_cw(x0, y0, x1, y1) end)            -- light frost
+  shape(ass, "FFFFFF", 0xF2, function(d) d:rect_cw(x0, y0, x1, math.floor(y0 + r.h * 0.48)) end) -- sheen
+  shape(ass, "FFFFFF", 0xB8, function(d) d:rect_cw(x0 + t, y0 + t, x1 - t, y0 + 2 * t) end) -- inner highlight
+  if hot then shape(ass, ACCENT, 0xE0, function(d) d:rect_cw(x0, y0, x1, y1) end) end
+  if on then shape(ass, ON, (ON == RUST or ON == AMBER) and 0xC8 or 0xEC, function(d) d:rect_cw(x0, y0, x1, y1) end) end
+  if k > 0 then
+    shape(ass, ACCENT, 255 - math.floor(k * 240), function(d) d:rect_cw(x0, y0, x1, y1) end)
+  end
+  local col, al = "FFFFFF", 0x90
+  if hot or on then col, al = (on and ON or ACCENT), 0x00 end
+  shape(ass, col, al, function(d)
+    outline(d, r.x, r.y, r.w, r.h, t)
+    if style == "segment" or HUD() then ticks(d, r.x, r.y, r.w, r.h, t + 1, math.floor(r.h * 0.22)) end
+  end)
+  if k > 0.35 then return INK, 0x00 end
+  if on then return ON, 0x00 end
+  return "FFFFFF", hot and 0x00 or 0x10
+end
+
+local function stroke(p) return math.max(1, math.floor(p.u * 0.055 + 0.5)) end
+local function g_play(ass, r, col, al, paused)
+  local cx, cy, s = r.x + r.w / 2, math.floor(r.y + r.h / 2), r.h * 0.2
+  shape(ass, col, al, function(d)
+    if paused then tri(d, cx - 0.7 * s, cy - s, cx + s, cy, cx - 0.7 * s, cy + s)
+    else
+      local bw = math.max(2, math.floor(s * 0.45))
+      local x1 = math.floor(cx - s * 0.7); local x2 = math.floor(cx + s * 0.7) - bw
+      d:rect_cw(x1, cy - s, x1 + bw, cy + s); d:rect_cw(x2, cy - s, x2 + bw, cy + s)
+    end
+  end)
+end
+local function g_line(ass, r, col, al, plus, k)  -- sharp minus / plus
+  local cx, cy, l = math.floor(r.x + r.w / 2), math.floor(r.y + r.h / 2), math.floor(math.min(r.w, r.h) * 0.30)
+  local kk = math.max(2, k)
+  shape(ass, col, al, function(d)
+    local o = math.floor(kk / 2)
+    d:rect_cw(cx - l, cy - o, cx + l + (kk % 2), cy - o + kk)
+    if plus then d:rect_cw(cx - o, cy - l, cx - o + kk, cy + l + (kk % 2)) end
+  end)
+end
+local function g_fs(ass, r, col, al, full, t)
+  local s = math.floor(math.min(r.w, r.h) * 0.50)
+  local x, y = math.floor(r.x + (r.w - s) / 2), math.floor(r.y + (r.h - s) / 2)
+  local l, x1, y1 = math.floor(s * 0.36), x + s, y + s
+  shape(ass, col, al, function(d)
+    if not full then ticks(d, x, y, s, s, t, l)
+    else
+      d:rect_cw(x, y + l - t, x + l, y + l);   d:rect_cw(x + l - t, y, x + l, y + l)
+      d:rect_cw(x1 - l, y + l - t, x1, y + l); d:rect_cw(x1 - l, y, x1 - l + t, y + l)
+      d:rect_cw(x, y1 - l, x + l, y1 - l + t); d:rect_cw(x + l - t, y1 - l, x + l, y1)
+      d:rect_cw(x1 - l, y1 - l, x1, y1 - l + t); d:rect_cw(x1 - l, y1 - l, x1 - l + t, y1)
+    end
+  end)
+end
+local function g_vol(ass, p, r, col, al, muted, vol)
+  local compact = r.w < r.h * 1.5
+  local s = r.h * 0.085
+  local cx, cy = compact and r.x + r.w / 2 + s * 0.6 or r.x + r.h * 0.5, r.y + r.h / 2
+  shape(ass, col, al, function(d)
+    d:move_to(cx - 1.8 * s, cy - 0.7 * s); d:line_to(cx - 0.7 * s, cy - 0.7 * s)
+    d:line_to(cx + 0.6 * s, cy - 1.8 * s); d:line_to(cx + 0.6 * s, cy + 1.8 * s)
+    d:line_to(cx - 0.7 * s, cy + 0.7 * s); d:line_to(cx - 1.8 * s, cy + 0.7 * s)
+  end)
+  if not compact then
+    mtext(ass, r.x + r.w - r.h * 0.3, cy, math.floor(p.fs * 0.95), col, al,
+      muted and "off" or string.format("%d", math.floor((vol or 0) + 0.5)), 6)
+  end
+end
+
+-- f22 centre dial: the one round control (play / pause) with three broken rings ------------
+local function ang(cx, cy, R, deg) local t = math.rad(deg); return cx + R * math.sin(t), cy - R * math.cos(t) end
+local function arc(d, cx, cy, r0, r1, a0, a1)        -- annular sector, 0 deg = 12 o'clock, clockwise
+  local n = math.max(2, math.ceil(math.abs(a1 - a0) / 3))
+  for i = 0, n do
+    local x, y = ang(cx, cy, r1, a0 + (a1 - a0) * i / n)
+    if i == 0 then d:move_to(x, y) else d:line_to(x, y) end
+  end
+  for i = n, 0, -1 do d:line_to(ang(cx, cy, r0, a0 + (a1 - a0) * i / n)) end
+end
+local function radial(d, cx, cy, r0, r1, deg, wpx)  -- thin radial tick
+  local t = math.rad(deg); local nx, ny = math.cos(t) * wpx / 2, math.sin(t) * wpx / 2
+  local x0, y0 = ang(cx, cy, r0, deg); local x1, y1 = ang(cx, cy, r1, deg)
+  d:move_to(x0 - nx, y0 - ny); d:line_to(x1 - nx, y1 - ny); d:line_to(x1 + nx, y1 + ny); d:line_to(x0 + nx, y0 + ny)
+end
+local function draw_dial(ass, p, r, paused, muted)
+  local P = r.h
+  local cx, cy = r.x + r.w / 2, r.y + r.h / 2
+  local SC = paused and AMBER or ACCENT                         -- state colour (matches the scope)
+  local hot, k = state.hot == "play", fx_k("play")
+  local th = math.max(1, P * 0.018)                             -- hairline weight
+  local pos, dur = mp.get_property_number("time-pos"), mp.get_property_number("duration")
+  if pos and remfx.cur then pos = remfx.cur(pos) or pos end
+  local f = (pos and dur and dur > 0) and math.max(0, math.min(1, pos / dur)) or 0
+  -- OUTER: playback progress, four quarter arcs (gaps = 25 / 50 / 75 %)
+  local Ro = P * 0.64; local Ri = Ro - th
+  local gq, F = 4, f * 360
+  shape(ass, "FFFFFF", 0xC0, function(d) for q = 0, 3 do
+    local a0 = math.max(q * 90 + gq, F)
+    if a0 < q * 90 + 90 - gq then arc(d, cx, cy, Ri, Ro, a0, q * 90 + 90 - gq) end
+  end end)
+  if F > gq then shape(ass, SC, 0x00, function(d) for q = 0, 3 do
+    local a0, a1 = q * 90 + gq, math.min(q * 90 + 90 - gq, F)
+    if a1 > a0 then arc(d, cx, cy, Ri - th * 0.4, Ro + th * 0.4, a0, a1) end
+  end end) end
+  shape(ass, "FFFFFF", 0x10, function(d) radial(d, cx, cy, Ri - th * 2, Ro + th * 2, F, math.max(1, th)) end)   -- progress index
+  -- MIDDLE: volume, 270 deg in 10 clean segments (open at the bottom)
+  local Vo = P * 0.565; local Vi = Vo - th * 1.3
+  local vol = math.max(0, math.min(100, mp.get_property_number("volume") or 0))
+  local N, A0, SW = 10, -135, 270
+  local seg = SW / N
+  local lit = math.floor(vol / 100 * N + 0.5)
+  local VC = muted and RUST or SC
+  shape(ass, "FFFFFF", 0xD0, function(d) for i = lit, N - 1 do arc(d, cx, cy, Vi, Vo, A0 + i * seg + 2.5, A0 + (i + 1) * seg - 2.5) end end)
+  if lit > 0 then shape(ass, VC, muted and 0x40 or 0x18, function(d)
+    for i = 0, lit - 1 do arc(d, cx, cy, Vi, Vo, A0 + i * seg + 2.5, A0 + (i + 1) * seg - 2.5) end end) end
+  -- INNER: progress ring, 24 ticks clockwise from 12 o'clock. Done ticks solid in the state colour,
+  -- the building tick breathes (~1 Hz cosine, never off) until its slice completes, the rest stay dim.
+  -- Paused: no breath, the building tick holds at half. LIVE: no fill (dim ring, top index only).
+  -- No timer of its own: it rides the 25 Hz remfx clock that already runs while the bar is visible.
+  local Rb = P * 0.41
+  if P >= 56 then
+    local To = P * 0.495; local Ti = To - P * 0.05
+    local NT, live_now = 24, is_live()
+    local done = live_now and 0 or math.min(NT, math.floor(f * NT + 1e-6))
+    local wf, wd = math.max(1.5, th * 1.3), math.max(1, th * 0.8)
+    shape(ass, "FFFFFF", 0xB0, function(d) for i = done + 1, NT - 1 do radial(d, cx, cy, Ti, To, i * 15, wd) end end)
+    if done > 0 then shape(ass, SC, 0x00, function(d) for i = 0, done - 1 do radial(d, cx, cy, Ti, To, i * 15, wf) end end) end
+    if live_now then shape(ass, SC, 0x00, function(d) radial(d, cx, cy, Ti, To, 0, wf) end)
+    elseif done < NT then
+      local al
+      if paused then al = 0x80
+      else local b = 0.5 - 0.5 * math.cos(mp.get_time() * 2 * math.pi)   -- 1 s eased breath
+        al = math.floor(0x90 * (1 - b) + 0.5) end                       -- 0x90 (dim) .. 0x00 (solid)
+      shape(ass, SC, al, function(d) radial(d, cx, cy, Ti, To, done * 15, wf) end)
+    end
+  end
+  -- BUTTON: dark glass disc, one crisp rim
+  shape(ass, INK, 0x60, function(d) arc(d, cx, cy, 0, Rb, 0, 360) end)
+  if hot then shape(ass, SC, 0xE6, function(d) arc(d, cx, cy, 0, Rb, 0, 360) end) end
+  if k > 0 then shape(ass, SC, 255 - math.floor(k * 230), function(d) arc(d, cx, cy, 0, Rb, 0, 360) end) end
+  shape(ass, SC, hot and 0x00 or 0x20, function(d) arc(d, cx, cy, Rb - math.max(1, P * 0.014), Rb, 0, 360) end)
+  local gc = k > 0.35 and INK or SC
+  local s = P * 0.14
+  shape(ass, gc, 0x00, function(d)
+    if paused then tri(d, cx - 0.55 * s, cy - s, cx + s, cy, cx - 0.55 * s, cy + s)
+    else
+      local bw = math.max(2, math.floor(s * 0.28 + 0.5))
+      local x1 = math.floor(cx - s * 0.5); local x2 = math.floor(cx + s * 0.5) - bw
+      d:rect_cw(x1, cy - s, x1 + bw, cy + s); d:rect_cw(x2, cy - s, x2 + bw, cy + s)
+    end
+  end)
+  if paused and P >= 30 then
+    mtext(ass, cx, cy + Rb * 0.62, math.max(7, math.floor(P * 0.095)), gc, 0x20, "HOLD", 5, "\\fsp2")
+  end
+end
+
+local function seek_frac(x)
+  local r = state.buttons.seek
+  if not r then return 0 end
+  return math.max(0, math.min(1, (x - r.x) / r.w))
+end
+
+-- tick scales: a tape's step comes from the pixels it has, never from the duration a media
+-- header claims. Past the NICE table the major step grows in whole 1 / 2 / 5 x 10^k hours until it
+-- fits, so a scale never holds more ticks than its size allows (TICK_MAX is a hard backstop).
+-- inf / NaN / <= 0 / > DUR_MAX (about 31 years) get no scale. Geometry is cached per tape and only
+-- rebuilt when the duration or the tape size changes, not every frame.
+local scale = { TICK_MAX = 1024, DUR_MAX = 1e9, cache = {} }
+function scale.dur(d)
+  if type(d) ~= "number" or d ~= d or d <= 0 or d > scale.DUR_MAX then return nil end
+  return d
+end
+function scale.major(NICE, fits, need)       -- need: smallest step that fits (seconds)
+  for _, v in ipairs(NICE) do if fits(v) then return v end end
+  if need ~= need or need <= 0 or need == math.huge then return nil end
+  local h = need / 3600
+  local e = 10 ^ math.floor(math.log10(h))
+  for _, m in ipairs({ 1, 2, 5, 10 }) do if m * e >= h then return math.max(NICE[#NICE], m * e * 3600) end end
+end
+function scale.cached(id, key, build)
+  local c = scale.cache[id]
+  if c and c.key == key then return c.v end
+  local v = build()
+  scale.cache[id] = { key = key, v = v }
+  return v
+end
+
+local function draw_seek(ass, p, r)
+  local pos, dur = mp.get_property_number("time-pos"), mp.get_property_number("duration")
+  local f = (pos and dur and dur > 0) and math.max(0, math.min(1, pos / dur)) or 0
+  local hot = state.hot == "seek" or state.hot == "phead" or state.dragging
+  local cy = r.cy
+  if style == "segment" then          -- a row of small square cells
+    local c = math.max(3, math.floor(p.u * 0.13))
+    local n = math.max(8, math.floor((r.w + 2) / (c + math.max(2, math.floor(c * 0.55)))))
+    local pitch = (r.w - c) / (n - 1)
+    local on = math.floor(f * (n - 1) + 0.5)
+    local y0 = math.floor(cy - c / 2)
+    shape(ass, "FFFFFF", 0xB0, function(d)
+      for i = on + 1, n - 1 do local x = math.floor(r.x + i * pitch); d:rect_cw(x, y0, x + c, y0 + c) end
+    end)
+    if on > 0 then
+      shape(ass, ACCENT, 0x00, function(d)
+        for i = 0, on - 1 do local x = math.floor(r.x + i * pitch); d:rect_cw(x, y0, x + c, y0 + c) end
+      end)
+    end
+    local hx, hh = math.floor(r.x + on * pitch), math.floor(c * (hot and 3.4 or 2.6))
+    shape(ass, "FFFFFF", 0x00, function(d) d:rect_cw(hx, cy - hh / 2, hx + c, cy + hh / 2) end)
+  elseif style == "f22" and dur and dur > 0 then   -- rangefinder / chronograph scale
+    local y0 = math.floor(cy)
+    local px = math.floor(r.x + r.w * f)
+    local lf = math.max(13, math.floor(p.fs * 0.74))
+    local long = dur >= 3600
+    local function lbl(t)
+      t = math.floor(t + 0.5)
+      if long then return string.format("%d:%02d", math.floor(t / 3600), math.floor(t / 60) % 60) end
+      return string.format("%02d:%02d", math.floor(t / 60), t % 60)
+    end
+    local lw = (long and 4 or 5) * lf * 0.62
+    local NICE = { 1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600, 7200, 18000 }
+    local sd = r.w > 0 and scale.dur(dur)
+    local M = sd and scale.major(NICE, function(v) return (dur / v) * lw * 2.9 <= r.w end, dur * lw * 2.9 / r.w)
+    local pxs = r.w / dur                              -- pixels per second
+    local tl = math.max(3, math.floor(p.u * 0.13))
+    local tm = math.max(5, math.floor(p.u * 0.24))
+    local tL = math.max(7, math.floor(p.u * 0.38))
+    -- base line: dim ahead, jade behind the playhead
+    shape(ass, "FFFFFF", 0x98, function(d) d:rect_cw(r.x, y0, r.x + r.w, y0 + 1) end)
+    if px > r.x then shape(ass, ACCENT, 0x00, function(d) d:rect_cw(r.x, y0 - 1, px, y0 + 2) end) end
+    local xe = r.x + r.w                               -- end-of-tape bar
+    local sc = M and scale.cached("seek", string.format("%.17g|%.17g|%.17g|%.17g|%.17g", dur, r.x, r.w, p.u, lf), function()
+      local o = { ticks = {}, labels = {} }
+      local labels = r.w >= p.u * 9 and M * pxs >= lw * 1.6
+      local med = M * pxs / 2 >= 7
+      local sub = (M % 10 == 0 or M < 10) and M / 10 or M / 5
+      if M == 15 or M == 900 then sub = M / 5 end
+      local minor = sub * pxs >= 4 and r.w >= p.u * 7
+      local step = minor and sub or (med and M / 2 or M)
+      local n = math.floor(dur / step + 1e-6)
+      if n > scale.TICK_MAX then return o end
+      for i = 0, n do
+        local t = i * step
+        local x = math.floor(r.x + t * pxs)
+        local isM = math.abs(t / M - math.floor(t / M + 0.5)) < 1e-6
+        local isMed = not isM and math.abs((t * 2) / M - math.floor((t * 2) / M + 0.5)) < 1e-6
+        o.ticks[#o.ticks + 1] = { x, isM and tL or (isMed and tm or tl) }
+      end
+      if labels and math.floor(dur / M + 1e-6) <= scale.TICK_MAX then
+        local last = -1e9
+        for i = 0, math.floor(dur / M + 1e-6) do
+          local t = i * M
+          local x = math.floor(r.x + t * pxs)
+          if x - last >= lw * 1.4 and x + lw / 2 <= xe + lw * 0.1 then
+            o.labels[#o.labels + 1] = { x, lbl(t), (i == 0) and 7 or 8 }
+            last = x
+          end
+        end
+      end
+      return o
+    end)
+    local tk = sc and sc.ticks or {}
+    shape(ass, "FFFFFF", 0x88, function(d)
+      for _, k in ipairs(tk) do if k[1] > px then d:rect_cw(k[1], y0 + 3, k[1] + 1, y0 + 3 + k[2]) end end
+      d:rect_cw(xe - 1, y0 + 3, xe, y0 + 3 + tL)
+    end)
+    if tk[1] and tk[1][1] <= px then
+      shape(ass, ACCENT, 0x10, function(d) for _, k in ipairs(tk) do if k[1] <= px then d:rect_cw(k[1], y0 + 3, k[1] + 1, y0 + 3 + k[2]) end end end)
+    end
+    -- heading row above the line: the run mapped to 000-360 deg (50 % = S), ticks every 15 deg,
+    -- 45 deg taller; labels N 045 E 135 S 225 W 315 N on wide tapes; jade once passed
+    if r.w >= p.u * 6 then
+      local a, bb = {}, {}
+      for i = 1, 23 do
+        local x = math.floor(r.x + r.w * i / 24)
+        local len = (i % 6 == 0) and 5 or ((i % 3 == 0) and 3 or 2)
+        local list = x <= px and a or bb
+        list[#list + 1] = { x, len }
+      end
+      shape(ass, "FFFFFF", 0xA8, function(d) for _, k in ipairs(bb) do d:rect_cw(k[1], y0 - 2 - k[2], k[1] + 1, y0 - 2) end end)
+      if #a > 0 then shape(ass, ACCENT, 0x40, function(d) for _, k in ipairs(a) do d:rect_cw(k[1], y0 - 2 - k[2], k[1] + 1, y0 - 2) end end) end
+      local cf = math.max(8, math.floor(lf * 0.78))
+      if r.w >= p.u * 12 and r.w / 8 >= cf * 0.62 * 5 then
+        local NAMES = { [0] = "N", [2] = "E", [4] = "S", [6] = "W", [8] = "N" }
+        for i = 0, 8 do
+          local x = math.floor(r.x + r.w * i / 8)
+          local passed = x <= px
+          local card = NAMES[i] ~= nil
+          local an = i == 0 and 1 or (i == 8 and 3 or 2)
+          mtext(ass, x, y0 - 4 - (i % 2 == 0 and 5 or 3), cf, passed and ACCENT or "FFFFFF",
+            passed and (card and 0x00 or 0x30) or (card and 0x60 or 0x88), NAMES[i] or string.format("%03d", i * 45), an, "\\fsp1")
+        end
+      end
+    end
+    if sc and #sc.labels > 0 then
+      local ly = y0 + 4 + tL + math.floor(lf * 0.1)
+      for _, k in ipairs(sc.labels) do
+        local passed = k[1] <= px
+        mtext(ass, k[1], ly, lf, passed and ACCENT or "FFFFFF", passed and 0x00 or 0x60, k[2], k[3], "\\fsp0")
+      end
+    end
+    -- machined index: hairline through the tape, bevelled bug head above it, riding time tag
+    local W = math.max(10, math.floor(p.u * (p.FS and 0.72 or 0.44) * (hot and 1.12 or 1) / 2) * 2)   -- bigger in fullscreen
+    local H = math.floor(W * 0.8)
+    local c = math.max(2, math.floor(W * 0.3))
+    local yb = y0 - 3                                     -- tip of the head
+    local yt = yb - H - c
+    local tf = math.max(9, math.floor(lf * (p.FS and 1.25 or 0.95)))
+    local th2 = math.floor(tf * 1.35)
+    local tyc = y0 + 4 + tL + math.floor(lf * 0.1) + math.floor(lf * 0.55)   -- centre of the label row
+    local ty = math.floor(tyc - th2 / 2)
+    local yl = ty                                         -- hairline runs down to the riding tag
+    local gb = math.max(2, math.floor(W * 0.25))
+    -- playhead: one glowing vertical line whose colour runs with progress
+    -- jade (0 %) -> white (40 %) -> amber (75 %) -> rust (100 %); LIVE stays jade
+    local LC = is_live() and ACCENT or prog_col(f)
+    local gw = math.max(2, math.floor(W * 0.18))           -- halo half-width
+    ass:new_event()                                       -- soft halo: wide, low alpha, blurred
+    ass:append(string.format("{\\an7\\pos(0,0)\\shad0\\bord0\\blur%d\\1c&H%s&\\1a&H%s&}", gb, LC, a(0x70)))
+    ass:draw_start(); ass:rect_cw(px - gw, yt, px + gw + 1, yl); ass:draw_stop()
+    shape(ass, LC, 0x00, function(d) d:rect_cw(px - 1, yt, px + 1, yl) end)   -- thin bright core (2 px)
+    -- riding time tag (07:59.482) on the scale's number row: opaque, so it occludes the minute
+    -- labels as it passes over them; centred under the needle, clamped to the tape ends
+    local txt, tlen = remfx.tms(remfx.cur(pos), tf, 0x50)
+    local tw2 = math.floor(tlen * tf * 0.6 + tf * 0.8)
+    local tx = math.max(r.x - math.floor(tf * 0.3), math.min(r.x + r.w - tw2 + math.floor(tf * 0.3), math.floor(px - tw2 / 2)))
+    shape(ass, INK, 0x00, function(d) d:rect_cw(tx, ty, tx + tw2, ty + th2) end)
+    shape(ass, ACCENT, 0x00, function(d)
+      outline(d, tx, ty, tw2, th2, 1)
+      local k = math.max(2, math.floor(th2 * 0.22))               -- pointer notch up into the needle
+      if px - k >= tx and px + k <= tx + tw2 then tri(d, px - k, ty, px + k + 1, ty, px, ty - k) end
+    end)
+    mtext(ass, tx + tw2 / 2, ty + th2 / 2, tf, "FFFFFF", 0x00, txt, 5, "\\fsp0")
+    local gx0, gx1 = math.min(px - W / 2, tx), math.max(px + W / 2, tx + tw2)
+    state.buttons.phead = { x = math.floor(gx0 - 4), y = yt - 4, w = math.floor(gx1 - gx0 + 8), h = ty + th2 - yt + 8 }  -- grab target
+  elseif HUD() then          -- graduated scale: 1px line, ticks, small square playhead
+    local y0 = math.floor(cy)
+    shape(ass, "FFFFFF", 0x98, function(d) d:rect_cw(r.x, y0, r.x + r.w, y0 + 1) end)
+    local px = math.floor(r.x + r.w * f)
+    if px > r.x then shape(ass, ACCENT, 0x00, function(d) d:rect_cw(r.x, y0 - 1, px, y0 + 2) end) end
+    local N = 40
+    local tl, tL = math.max(3, math.floor(p.u * 0.12)), math.max(6, math.floor(p.u * 0.26))
+    shape(ass, "FFFFFF", 0xA0, function(d)
+      for i = 0, N do
+        local x = math.floor(r.x + r.w * i / N)
+        if x > px then d:rect_cw(x, y0 + 3, x + 1, y0 + 3 + ((i % 10 == 0) and tL or tl)) end
+      end
+    end)
+    shape(ass, ACCENT, 0x30, function(d)
+      for i = 0, N do
+        local x = math.floor(r.x + r.w * i / N)
+        if x <= px then d:rect_cw(x, y0 + 3, x + 1, y0 + 3 + ((i % 10 == 0) and tL or tl)) end
+      end
+    end)
+    local k = math.floor(p.u * (hot and 0.28 or 0.22) / 2) * 2
+    if style == "f22" then             -- chevron caret riding the tape
+      local kk = math.floor(k * 1.3)
+      shape(ass, ACCENT, 0x00, function(d) tri(d, px - kk, y0 - kk - 3, px + kk, y0 - kk - 3, px, y0 - 1) end, 1, INK, 0x30)
+    else
+    shape(ass, ACCENT, 0x00, function(d) d:rect_cw(px - k / 2, y0 - k / 2, px + k / 2, y0 + k / 2) end, 1, INK, 0x20)
+    end
+    shape(ass, ACCENT, 0x00, function(d) d:rect_cw(px, y0 - math.floor(k * 1.3), px + 1, y0 + 3 + tL) end)
+  else                                -- one hairline with a square playhead
+    local th = hot and p.st + 1 or p.st
+    local y0 = math.floor(cy - th / 2)
+    shape(ass, "FFFFFF", 0xA8, function(d) d:rect_cw(r.x, y0, r.x + r.w, y0 + th) end)
+    local px = math.floor(r.x + r.w * f)
+    if px > r.x then shape(ass, ACCENT, 0x00, function(d) d:rect_cw(r.x, y0, px, y0 + th) end) end
+    local k = math.floor(th * (hot and 4.2 or 3.2) / 2) * 2
+    shape(ass, ACCENT, 0x00, function(d) d:rect_cw(px - k / 2, cy - k / 2, px + k / 2, cy + k / 2) end,
+      1, INK, 0x30)
+  end
+  state.htag = nil
+  if hot and dur and dur > 0 then     -- hover tag: the time under the pointer
+    local m = mp.get_property_native("mouse-pos")
+    local mx = state.preview_x or (m and m.x)
+    if mx then state.htag = { r = r, mx = mx, t = seek_frac(mx) * dur } end   -- drawn last, on top
+  end
+end
+
+-- neon title ticker ------------------------------------------------------------------------
+-- Share Tech Mono (OFL, ~/.local/share/fonts) with a JetBrains Mono fallback. Static when it fits
+-- its slot; otherwise it loops right-to-left. The 30 fps timer runs only while the HUD is up and
+-- the title overflows.
+local NEON = "Share Tech Mono"
+local NEON_CORE, NEON_GLOW = "EAFFF6", ACCENT       -- mint-white core, jade glow (BGR)
+local SPEED, GAP = 42, "  //  "
+local measure_ov = mp.create_osd_overlay("ass-events")
+measure_ov.compute_bounds, measure_ov.hidden = true, true
+local tw_cache = {}
+local marquee = { timer = nil, t0 = mp.get_time(), key = nil, demo = nil }
+local function clamp01(v) return math.max(0, math.min(1, v)) end
+local ENT = { amp = "&", lt = "<", gt = ">", quot = '"', apos = "'", nbsp = " ", ["#39"] = "'", ["#x27"] = "'", ["#038"] = "&" }
+local function unent(str)                       -- titles arrive with HTML entities (&amp; from X / yt-dlp)
+  if not str:find("&", 1, true) then return str end
+  return (str:gsub("&(#?%w+);", function(k)
+    if ENT[k] then return ENT[k] end
+    local n = tonumber(k:match("^#(%d+)$") or "")
+    if n and n >= 32 and n < 127 then return string.char(n) end
+  end))
+end
+-- titles: drop emoji + symbols the HUD font can't draw (pictographs, flags, dingbats, variation
+-- selectors, ZWJ, keycaps, tags, private use), then tidy the leftover spaces / separators
+local function drop_cp(c)
+  return c >= 0x1F000                               -- emoji, flags (regional indicators), tags, supplementary symbols
+    or (c >= 0x2190 and c <= 0x2BFF)                -- arrows, technical, boxes, shapes, misc symbols, dingbats
+    or (c >= 0xFE00 and c <= 0xFE0F) or c == 0x200D or c == 0x20E3 or c == 0xFFFD
+    or (c >= 0xE000 and c <= 0xF8FF) or c == 0x3030 or c == 0x303D or (c >= 0x3297 and c <= 0x3299)
+    or (c >= 0x2460 and c <= 0x24FF and c ~= 0x24C2)
+end
+local SEP = { "|", "/", "-", "~", ":", "·", "•", "–", "—", ",", "+" }
