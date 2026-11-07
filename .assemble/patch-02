@@ -58,7 +58,7 @@
    if er.big then
 -    local lf2 = math.max(8, math.floor(p.fs * 0.62))
 +    local lf2 = math.max(er.big and 13 or 8, math.floor(p.fs * 0.62))
-     local nm = { "L", "R", "\u03a3" }
+     local nm = { "L", "R", "Σ" }
      for k = 1, 3 do
        mtext(ass, er.lx + math.floor(lf2 * 0.2), er.y + (k - 1) * (ch + rg) + ch / 2, lf2, muted and RUST or "FFFFFF",
 @@ -1857,26 +1909,44 @@ local function draw_f22(ass, p, b, w, h, pos, dur, st)
@@ -142,9 +142,9 @@
 @@ -2068,7 +2138,7 @@ end
  -- by the normal render pass, gone on the next one once the pointer leaves)
  local inside                           -- (set below, with hit())
- local KEYCAP = { back = "J", play = "K", fwd = "L", vol = "M", vgauge = "\u2191\u2193", spd = "< >", loop = "R",
--  link = "I", hud = "H", pin = "P", smaller = "-", larger = "=", fs = "F", new = "O", help = "?", seek = "0-9 \u2190 \u2192" }
-+  link = "I", hud = "H", pin = "P", smaller = "-", larger = "=", fs = "F", new = "O", help = "?", night = "N", seek = "0-9 \u2190 \u2192" }
+ local KEYCAP = { back = "J", play = "K", fwd = "L", vol = "M", vgauge = "↑↓", spd = "< >", loop = "R",
+-  link = "I", hud = "H", pin = "P", smaller = "-", larger = "=", fs = "F", new = "O", help = "?", seek = "0-9 ← →" }
++  link = "I", hud = "H", pin = "P", smaller = "-", larger = "=", fs = "F", new = "O", help = "?", night = "N", seek = "0-9 ← →" }
  local KEYCAP_ABOVE = { hud = true, pin = true, smaller = true, larger = true, fs = true }
  local function keycaps(ass, p, b)
    local f = math.max(8, math.floor(p.fs * 0.9))
