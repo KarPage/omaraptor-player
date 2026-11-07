@@ -69,10 +69,12 @@ This adds a video button to your bar. Left-click plays the copied link, right-cl
 ### From the repository
 
 ```sh
-git clone https://github.com/KarPage/omaraptor-player && cd omaraptor-player && ./install.sh
+git clone https://github.com/KarPage/omaraptor-player && cd omaraptor-player && bash install.sh
 ```
 
-The installer puts `omaraptor` in `~/.local/bin`, the player config in `~/.config/omaraptor`, and window rules and key binds in `~/.config/hypr/omaraptor.lua`. It asks before it adds one line, `require("hypr.omaraptor")`, to `~/.config/hypr/hyprland.lua`, and it backs that file up first. Every file it replaces is copied to `<name>.bak-omaraptor-YYYYMMDDHHMMSS` first. Your own `script-opts` are kept on update (a missing `night=` line is added). Nothing is downloaded and nothing runs as root.
+The installer puts `omaraptor` in `~/.local/bin`, the player config in `~/.config/omaraptor`, and window rules and key binds in `~/.config/hypr/omaraptor.lua`. It asks before it adds one line, `require("hypr.omaraptor")`, to `~/.config/hypr/hyprland.lua`, and it backs that file up first. Every file it replaces is copied to `<name>.bak-omaraptor-YYYYMMDDHHMMSS` first. Your own `script-opts` are kept on update (a missing `night=` line is added). Nothing is downloaded and nothing runs as root. `bash install.sh` is the command to use; `./install.sh` is the same when the file is executable.
+
+The HUD source in this repository is `.assemble/hud-src-01` through `hud-src-10`, in that order. The installer joins them into `~/.config/omaraptor/scripts/omaraptor-hud.lua`. The checkout's `config/scripts/omaraptor-hud.lua` loads those same parts, so tests and a hand-run copy execute the joined script.
 
 A running player is never killed and never sent `quit`. If it is already running this HUD, the installer reloads the HUD in place and the video keeps playing. A player started from an older HUD keeps playing, and the new HUD, keys and night level apply the next time it opens. Hyprland rules reload now, so the next window opens unpinned; a window that is already open keeps its current pin until you toggle PIN or open it again. `input.conf` and `mpv.conf` are read when mpv starts.
 

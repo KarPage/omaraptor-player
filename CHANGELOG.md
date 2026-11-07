@@ -5,7 +5,8 @@
 - The window opens unpinned. It stays on the workspace where it opened and floats over the tiles there. PIN (the tile or `p`) pins it on every workspace, on top, and keeps the frame up. The tile lights jade while that is on. Fullscreen works pinned and unpinned (`allow_pin_fullscreen` stays on). `omaraptor pin [on|off|toggle|query]` is the same switch.
 - The PIN, HUD, size and fullscreen keys are larger, in line with the SPEED, REPEAT and LINK modules, and they scale with the window. Labels stay at least 13 px. On a very small window the words drop off instead of shrinking into a blur.
 - NIGHT cycles Off, Dim and Dimmer (`n` or the NIGHT tile). The picture gets a warm, softer tint from mpv brightness, gamma and saturation plus a light veil. Audio is unchanged and nothing rebuffers. The HUD dims one step with it. The level is saved in `script-opts/omaraptor-hud.conf`. Next video moved from `n` to `]`.
-- `install.sh` still copies every replaced file to `name.bak-omaraptor-YYYYMMDDHHMMSS` and never kills a running player. A player already on this HUD reloads in place and keeps playing. An older player keeps playing and picks the new HUD up the next time it opens.
+- `install.sh` still copies every replaced file to `name.bak-omaraptor-YYYYMMDDHHMMSS` and never kills a running player. A player already on this HUD reloads in place and keeps playing. An older player keeps playing and picks the new HUD up the next time it opens. Run it with `bash install.sh`.
+- The HUD source is `.assemble/hud-src-01` through `hud-src-10`. The installer joins them into the one script mpv loads. The file in `config/scripts/` loads those same parts.
 - Clipboard links can be Vimeo as well as the hosts from 1.0.3. Playback still depends on yt-dlp.
 
 ## 1.0.3 (2026-10-30)

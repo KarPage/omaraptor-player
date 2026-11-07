@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # OmaRaptor Player installer for Omarchy (Hyprland Lua config). Run it again to update.
 #
-#   ./install.sh    install or update. It asks before it adds its one line to hyprland.lua,
-#                   and never adds it without a terminal to ask in.
+#   bash install.sh    install or update. It asks before it adds its one line to hyprland.lua,
+#                      and never adds it without a terminal to ask in.
+#                      (./install.sh is the same when the file is marked executable.)
 #
 # Installs ~/.local/bin/omaraptor, ~/.config/omaraptor (your script-opts are kept),
 # ~/.config/hypr/omaraptor.lua plus one require line, a .desktop entry and icons.
@@ -23,9 +24,18 @@ missing=(); for c in mpv yt-dlp socat jq wl-paste hyprctl; do command -v "$c" >/
 ((${#missing[@]})) && say "missing: ${missing[*]}  (Omarchy: sudo pacman -S --needed mpv yt-dlp socat jq wl-clipboard)"
 
 put "$SRC/bin/omaraptor" "$BIN/omaraptor" 755
-for f in mpv.conf input.conf scripts/omaraptor-hud.lua scripts/omaraptor-autoplay.lua; do
+for f in mpv.conf input.conf scripts/omaraptor-autoplay.lua; do
   put "$SRC/config/$f" "$CFG/omaraptor/$f" 644
 done
+# The HUD is stored as ten ordered parts so the whole script can be published.
+# Join them into the one file mpv loads. A running player is not stopped.
+hudtmp=$(mktemp)
+cat "$SRC/.assemble/hud-src-01" "$SRC/.assemble/hud-src-02" "$SRC/.assemble/hud-src-03" \
+  "$SRC/.assemble/hud-src-04" "$SRC/.assemble/hud-src-05" "$SRC/.assemble/hud-src-06" \
+  "$SRC/.assemble/hud-src-07" "$SRC/.assemble/hud-src-08" "$SRC/.assemble/hud-src-09" \
+  "$SRC/.assemble/hud-src-10" > "$hudtmp"
+put "$hudtmp" "$CFG/omaraptor/scripts/omaraptor-hud.lua" 644
+rm -f "$hudtmp"
 opts=$CFG/omaraptor/script-opts/omaraptor-hud.conf
 if [[ ! -f $opts ]]; then
   put "$SRC/config/script-opts/omaraptor-hud.conf" "$opts" 644

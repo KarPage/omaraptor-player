@@ -26,6 +26,12 @@ env -i PATH="$T/stub:/usr/bin:/bin" HOME="$T/h2" bash "$R/install.sh" </dev/null
 ! grep -q hypr.omaraptor "$T/h2/.config/hypr/hyprland.lua"; ok "no terminal, no hyprland.lua edit"
 printf "y\n" | run script -qec "bash $R/install.sh" /dev/null
 [[ -x $T/home/.local/bin/omaraptor && -f $T/home/.config/omaraptor/scripts/omaraptor-hud.lua ]]; ok "install"
+hudgot=$(git hash-object "$T/home/.config/omaraptor/scripts/omaraptor-hud.lua")
+hudwant=$(cat "$R/.assemble/hud-src-01" "$R/.assemble/hud-src-02" "$R/.assemble/hud-src-03" \
+  "$R/.assemble/hud-src-04" "$R/.assemble/hud-src-05" "$R/.assemble/hud-src-06" \
+  "$R/.assemble/hud-src-07" "$R/.assemble/hud-src-08" "$R/.assemble/hud-src-09" \
+  "$R/.assemble/hud-src-10" | git hash-object --stdin)
+[[ $hudgot == "$hudwant" ]]; ok "installed HUD is the joined script"
 run bash "$R/install.sh" </dev/null
 [[ $(grep -cx 'require("hypr.omaraptor")' "$T/home/.config/hypr/hyprland.lua") == 1 ]]; ok "require line once"
 mkdir -p "$T/outside/omaraptor/scripts"; touch "$T/outside/omaraptor/scripts/omaraptor-hud.lua" "$T/outside/keep"
