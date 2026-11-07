@@ -1,0 +1,481 @@
+local function is_sep(t) for _, x in ipairs(SEP) do if t == x then return true end end return false end
+local clean_cache = { k = nil, v = nil, k2 = nil, v2 = nil }
+local function clean_title(str)
+  if str == clean_cache.k then return clean_cache.v end
+  if str == clean_cache.k2 then return clean_cache.v2 end
+  local out, n = {}, 0
+  if str:find("[\128-\255]") then
+    for ch in str:gmatch("[%z\1-\127\194-\244][\128-\191]*") do
+      local c, b = 0, ch:byte(1)
+      if b < 0x80 then c = b
+      elseif b < 0xE0 then c = (b % 0x20) * 0x40 + (ch:byte(2) or 0) % 0x40
+      elseif b < 0xF0 then c = ((b % 0x10) * 0x40 + (ch:byte(2) or 0) % 0x40) * 0x40 + (ch:byte(3) or 0) % 0x40
+      else c = 0x1F000 end                             -- 4-byte = astral plane: treat as emoji (dropped)
+      n = n + 1; out[n] = drop_cp(c) and " " or ch
+    end
+  else out[1] = str end
+  local s = table.concat(out):gsub("%s+", " ")
+  -- tokens: drop separators that end up doubled or dangling at either end, and empty brackets
+  local tok = {}
+  for w in s:gmatch("%S+") do
+    if is_sep(w) and (#tok == 0 or is_sep(tok[#tok])) then
+      -- skip: leading or repeated separator
+    else tok[#tok + 1] = w end
+  end
+  while #tok > 0 and is_sep(tok[#tok]) do tok[#tok] = nil end
+  local r = table.concat(tok, " "):gsub("%(%s*%)", ""):gsub("%[%s*%]", ""):gsub("%s+", " "):gsub("^%s+", ""):gsub("%s+$", "")
+  clean_cache.k2, clean_cache.v2 = clean_cache.k, clean_cache.v
+  clean_cache.k, clean_cache.v = str, r
+  return r
+end
+local function tesc(str) return (str:gsub("[{}]", ""):gsub("\\", "/"):gsub("\n", " ")) end
+local function text_w(txt, size, w, h)
+  local key = size .. "\0" .. txt
+  if tw_cache[key] then return tw_cache[key] end
+  measure_ov.res_x, measure_ov.res_y = w, h
+  measure_ov.data = string.format("{\\q2\\an7\\pos(0,0)\\fn%s\\fs%d\\fsp2\\bord0}%s", NEON, size, txt)
+  local r = measure_ov:update()
+  local tw = (r and r.x1 and r.x0) and (r.x1 - r.x0) or math.floor(#txt * size * 0.5)
+  tw_cache[key] = tw
+  return tw
+end
+local function marquee_run(on)
+  if on and not marquee.timer then
+    marquee.timer = mp.add_periodic_timer(1 / 25, function() if not remfx.timer then want() end end)
+  elseif not on and marquee.timer then
+    marquee.timer:kill(); marquee.timer = nil
+  end
+end
+local function neon(ass, x, y, size, txt, an, clip, alpha_k, gcol, ccol)
+  local G, Cc = gcol or NEON_GLOW, ccol or NEON_CORE
+  local base = string.format("{\\q2\\an%d\\pos(%d,%d)\\fn%s\\fs%d\\fsp2\\shad0%s", an, x, y, NEON, size, clip)
+  -- wide soft halo, then a tight glow, then the bright core
+  ass:new_event(); ass:append(base .. string.format("\\bord%d\\blur%d\\1c&H%s&\\3c&H%s&\\1a&H%s&\\3a&H%s&}%s",
+    math.max(3, math.floor(size * 0.32)), math.max(4, math.floor(size * 0.45)), G, G, a(0x60), a(0x90), txt))
+  ass:new_event(); ass:append(base .. string.format("\\bord%d\\blur%d\\1c&H%s&\\3c&H%s&\\1a&H%s&\\3a&H%s&}%s",
+    math.max(1, math.floor(size * 0.08)), 2, G, G, a(0x20), a(0x50), txt))
+  ass:new_event(); ass:append(base .. string.format("\\bord0\\blur0.4\\1c&H%s&\\1a&H%s&}%s", Cc, a(0x00), txt))
+end
+-- soft-edged ticker: no hard clip box. The slot fades the text in and out over ~1 em at both
+-- ends (4 alpha steps per end, each a \clip slice of the same neon text), and the clip is tall
+-- enough that the glow is never cut flat. The font is monospaced, so each slice carries only the
+-- characters that can reach it (+ the glow reach): libass renders/blurs, and mpv uploads, a small
+-- strip per slice instead of the whole repeated title.
+-- exact per-glyph advance of the ticker font at this size (monospaced; libass keeps advances on a
+-- 1/64 px grid). Bounds are whole pixels, so the end of a short and a long run of "0" is averaged
+-- over 8 sub-pixel phases and the result snapped to 1/64 px: no drift when slices are trimmed.
+-- Measured once per size (16 synchronous measure updates), then cached.
+local function tick_adv(size, w, h)
+  local key = "\1adv" .. size .. "x" .. w
+  if tw_cache[key] then return tw_cache[key] end
+  local k1 = 4
+  local k2 = math.max(k1 + 8, math.min(160, math.floor(w * 0.8 / (size * 0.5 + 2))))
+  measure_ov.res_x, measure_ov.res_y = w, h
+  local function ends(k)
+    local s, run = 0, string.rep("0", k)
+    for p = 0, 7 do
+      measure_ov.data = string.format("{\\q2\\an7\\pos(%.3f,0)\\fn%s\\fs%d\\fsp2\\bord0}%s", 4 + p / 8, NEON, size, run)
+      local r = measure_ov:update()
+      if not (r and r.x1) then return nil end
+      s = s + r.x1 - p / 8
+    end
+    return s / 8
+  end
+  local e1, e2 = ends(k1), ends(k2)
+  local adv = (e1 and e2) and (e2 - e1) / (k2 - k1) or (size * 0.461 + 2)
+  local q = math.floor(adv * 64 + 0.5) / 64
+  if math.abs(adv - q) < 0.004 then adv = q end
+  tw_cache[key] = adv
+  return adv
+end
+local function soft_ticker(ass, x, T, txt, tw1, n1, w, h)
+  local size = T.fs
+  local hb, hbl = math.max(3, math.floor(size * 0.32)), math.max(4, math.floor(size * 0.45))
+  local reach = hb + 2 * hbl                                   -- glow reach past a glyph
+  local ty0, ty1 = T.cy - math.floor(size * 0.5) - reach, T.cy + math.floor(size * 0.5) + reach
+  local F, K = math.max(10, math.floor(size * 1.0)), 4
+  local slot = T.x1 - T.x0
+  if slot < 2 * F + 4 then F = math.floor(slot / 3) end
+  local adv = tick_adv(size, w, h)
+  -- trim only when the advance is uniform (ASCII title in the mono font); else full text per slice
+  local mono = not txt:find("[\128-\255\\{}]") and math.abs(adv * n1 - tw1) < adv * 0.9
+  local function slice(sx0, sx1, m)
+    if sx1 <= sx0 then return end
+    local s, px = txt, x
+    if mono then
+      local i0 = math.max(0, math.floor((sx0 - reach - x) / adv) - 1)
+      local i1 = math.min(#txt, math.ceil((sx1 + reach - x) / adv) + 1)
+      if i1 <= i0 then return end
+      s, px = txt:sub(i0 + 1, i1), x + i0 * adv
+    end
+    local function al(v) return string.format("%02X", 255 - math.floor((255 - tonumber(a(v), 16)) * m + 0.5)) end
+    local base = string.format("{\\q2\\an4\\pos(%.3f,%d)\\fn%s\\fs%d\\fsp2\\shad0\\clip(%d,%d,%d,%d)", px, T.cy, NEON, size,
+      math.floor(sx0), ty0, math.floor(sx1), ty1)
+    ass:new_event(); ass:append(base .. string.format("\\bord%d\\blur%d\\1c&H%s&\\3c&H%s&\\1a&H%s&\\3a&H%s&}%s",
+      hb, hbl, NEON_GLOW, NEON_GLOW, al(0x60), al(0x90), s))
+    ass:new_event(); ass:append(base .. string.format("\\bord%d\\blur%d\\1c&H%s&\\3c&H%s&\\1a&H%s&\\3a&H%s&}%s",
+      math.max(1, math.floor(size * 0.08)), 2, NEON_GLOW, NEON_GLOW, al(0x20), al(0x50), s))
+    ass:new_event(); ass:append(base .. string.format("\\bord0\\blur0.4\\1c&H%s&\\1a&H%s&}%s", NEON_CORE, al(0x00), s))
+  end
+  local step = F / K
+  for i = 1, K do
+    local m = i / (K + 1)
+    slice(T.x0 + (i - 1) * step, T.x0 + i * step, m)               -- left fade-in
+    slice(T.x1 - i * step, T.x1 - (i - 1) * step, m)               -- right fade-out
+  end
+  slice(T.x0 + F, T.x1 - F, 1)
+end
+local function draw_title(ass, p, w, h)
+  local T = p.title
+  local raw = marquee.demo or mp.get_property("media-title") or ""
+  if not T or raw == "" then marquee_run(false); return end
+  local txt = tesc(clean_title(unent(raw)))
+  if txt == "" then marquee_run(false); return end    -- title was only emoji
+  local slot = T.x1 - T.x0
+  local tw = text_w(txt, T.fs, w, h)
+  if hud.light then                                       -- LIGHT: static title, cut with an ellipsis, no timer
+    marquee_run(false)
+    local key = txt .. "\0" .. slot .. "\0" .. T.fs
+    if hud.tkey ~= key then
+      local out = txt
+      if tw > slot then
+        local n = math.max(1, math.floor(#txt * slot / tw))
+        repeat
+          local c = n
+          while c > 1 and (txt:byte(c + 1) or 0) >= 0x80 and (txt:byte(c + 1) or 0) < 0xC0 do c = c - 1 end
+          out = txt:sub(1, c):gsub("%s+$", "") .. "…"
+          n = c - 1
+        until n < 1 or text_w(out, T.fs, w, h) <= slot
+      end
+      hud.tkey, hud.tout = key, out
+    end
+    mtext(ass, math.floor((T.x0 + T.x1) / 2), T.cy, T.fs, ACCENT, 0x00, hud.tout, 5, "\\fsp1")
+    return
+  end
+  -- (no slot brackets / hard clip box: the ends fade softly, see soft_ticker)
+  -- continuous ticker: always scrolls (even when the title fits), seamless loop "title  //  title  //"
+  if marquee.key ~= txt then marquee.key = txt; marquee.t0 = mp.get_time() end
+  local loop = txt .. GAP
+  local lw = math.max(1, text_w(loop, T.fs, w, h))
+  local reps = math.floor(slot / lw) + 2                  -- enough copies to cover the slot + one wrap
+  local off = ((mp.get_time() - marquee.t0) * SPEED) % lw
+  local x = math.floor(T.x0 - off)
+  soft_ticker(ass, x, T, string.rep(loop, reps), tw, #txt, w, h)
+  marquee_run(state.visible)
+end
+
+-- f22 cockpit instruments ------------------------------------------------------------------
+-- Every element is a control or a live readout (no decoration-only tiles):
+--   nav data line: CH (window corner from the launcher, else socket number), RES video-params/h,
+--   FPS container-fps, CODEC video-format, local clock; VOL gauge = volume (click / drag);
+--   SPD softkey = speed cycle; LOOP softkey = loop-file; LINK lamp = demuxer-cache-duration,
+--   amber while paused-for-cache / cache < 2 s, grey for local files.
+local chan_cache = { t = -10, v = "--" }
+local function channel()
+  if mp.get_time() - chan_cache.t < 2 then return chan_cache.v end
+  local sock = mp.get_property("input-ipc-server") or ""
+  local v
+  local fh = sock ~= "" and io.open((sock:gsub("%.sock$", "")) .. ".corner", "r")
+  if fh then v = (fh:read("*l") or ""):upper():gsub("[^%w]", ""); fh:close() end
+  if not v or v == "" then
+    local n = sock:match("%-(%d+)%.sock$")
+    v = n and #n <= 3 and string.format("%02d", tonumber(n)) or "01"
+  end
+  chan_cache.t, chan_cache.v = mp.get_time(), v
+  return v
+end
+local SPEEDS = { 1, 1.25, 1.5, 2, 0.75 }
+local info_pop                     -- (set further down) centre popup for SPD / LOOP / BUFFER
+local set_light                    -- (set further down) HUD COMBAT / CRUISE
+local arm_toggle                   -- (set further down) MASTER ARM / STAND DOWN panel
+local function link_state()
+  if not mp.get_property_bool("demuxer-via-network") then return "LOCAL", "FFFFFF", 0x80 end
+  local c = mp.get_property_number("demuxer-cache-duration") or 0
+  local txt = string.format("LINK %02ds", math.min(99, math.floor(c)))
+  if mp.get_property_bool("paused-for-cache") or (c < 2 and not mp.get_property_bool("demuxer-cache-idle")) then
+    return txt, AMBER, 0x00
+  end
+  return txt, ACCENT, 0x00
+end
+-- fullscreen cockpit: screen frame, heading (fine-seek) tape, VOL + TIME vertical tapes ----------
+local function lbl_t(t, long)
+  t = math.floor(t + 0.5)
+  if long then return string.format("%d:%02d", math.floor(t / 3600), math.floor(t / 60) % 60) end
+  return string.format("%02d:%02d", math.floor(t / 60), t % 60)
+end
+local function ptr_box(ass, x, y, side_, txt, size, col, bw, bh, mode, tcol)   -- tcol: readout colour (default white)
+  -- boxed readout with a pointer notch: side_ = 1 notch on the left (box to the right), -1 mirrored
+  -- mode: nil normal | "hot" (hover / drag: thicker frame + up/down chevrons) | "ghost" (value under the cursor)
+  local x0 = side_ > 0 and x + math.floor(bh * 0.35) or x - math.floor(bh * 0.35) - bw
+  local ghost = mode == "ghost"
+  shape(ass, INK, ghost and 0x60 or 0x18, function(d) d:rect_cw(x0, y - bh / 2, x0 + bw, y + bh / 2) end)
+  shape(ass, col, ghost and 0x90 or 0x00, function(d)
+    outline(d, x0, math.floor(y - bh / 2), bw, bh, mode == "hot" and 3 or (ghost and 1 or 2))
+    local k = math.floor(bh * 0.35)
+    if side_ > 0 then tri(d, x0, y - k, x0, y + k, x0 - k, y) else tri(d, x0 + bw, y - k, x0 + bw, y + k, x0 + bw + k, y) end
+  end)
+  if mode == "hot" then                              -- drag affordance: chevrons above and below the box
+    local cx, k, gp = math.floor(x0 + bw / 2), math.floor(bh * 0.32), math.floor(bh * 0.18)
+    local yt, yb = math.floor(y - bh / 2) - gp, math.floor(y + bh / 2) + gp
+    shape(ass, col, 0x00, function(d)
+      tri(d, cx - k, yt, cx + k, yt, cx, yt - k)
+      tri(d, cx - k, yb, cx, yb + k, cx + k, yb)
+    end)
+  end
+  mtext(ass, x0 + bw / 2, y, size, tcol or "FFFFFF", ghost and 0x70 or 0x00, txt, 5, "\\fsp1")
+  return x0
+end
+function remfx.cur(pos)       -- time-pos interpolated between frames while playing
+  local cur = remfx.pos or pos or 0
+  if not mp.get_property_bool("pause") and remfx.pos then
+    local fps = mp.get_property_number("container-fps") or 30
+    cur = cur + math.min(mp.get_time() - remfx.at, 1 / math.max(fps, 1)) * (mp.get_property_number("speed") or 1)
+  end
+  return cur
+end
+-- "07:59" .. small ".482": returns ASS text + its visible length (milliseconds smaller, optionally dimmer)
+local function tms(t, size, dim, prefix)
+  t = math.max(0, t or 0)
+  local i = math.floor(t)
+  local main = i >= 3600 and string.format("%d:%02d:%02d", math.floor(i / 3600), math.floor(i / 60) % 60, i % 60)
+    or string.format("%02d:%02d", math.floor(i / 60), i % 60)
+  main = (prefix or "") .. main
+  local ms = string.format(".%03d", math.min(999, math.floor((t - i) * 1000)))
+  local small = math.floor(size * 0.72 + 0.5)
+  return main .. string.format("{\\fs%d%s}", small, dim and ("\\1a&H" .. a(dim) .. "&") or "") .. ms,
+    #main + 4 * 0.72
+end
+remfx.tms = tms
+-- END RAMP: end-of-video escalation. Each threshold = min(abs seconds, pct x duration) remaining, so a
+-- long video warns at 4:00 / 2:00 / 1:00 / 0:30 with the NEXT card at 0:15, and a short clip scales
+-- down (20 s clip: amber 6 s, red 3 s, NEXT 2 s; never red near its start). One eased breath per
+-- `period` s (cosine, never off: the red only dims to 1 - depth); the last stage is the calmest-fast
+-- (1.0 s), slower than the old 2 Hz hard blink. COMBAT breathes on the existing 25 Hz REM clock;
+-- CRUISE (2 Hz tick) shows the stage colour steady, no breath. No new timers.
+remfx.ramp = {
+  amber  = { 240, 0.30 },                                  -- caution: steady amber        {abs s, pct}
+  stages = { { 120, 0.15 }, { 60, 0.08 }, { 30, 0.04 } },  -- S1 WARN / S2 / S3: red, breathing
+  next   = { 15, 0.10, 2 },                                -- FINAL: NEXT card (+ floor 2 s)
+  period = { 2.4, 1.8, 1.3, 1.0 },                         -- breath length per stage (s)
+  depth  = { 0.30, 0.40, 0.50, 0.55 },                     -- how far the red dims mid-breath
+}
+function remfx.nexti()                                     -- playlist index of a real next item, or nil
+  local lp = mp.get_property("loop-file", "no")
+  if lp ~= "no" and lp ~= "0" then return nil end          -- REPEAT on: the same video again, no NEXT
+  local n, cnt = mp.get_property_number("playlist-pos", 0), mp.get_property_number("playlist-count", 1)
+  if n + 1 < cnt then return n + 1 end
+  if cnt > 1 and mp.get_property("loop-playlist", "no") ~= "no" then return 0 end
+  return nil
+end
+function remfx.ramp_t(e, dur) return math.max(e[3] or 0, math.min(e[1], e[2] * dur)) end
+function remfx.dimc(hex, k)                                -- BGR hex scaled toward black by k (0..1)
+  local o = {}
+  for i = 1, 5, 2 do o[#o + 1] = string.format("%02X", math.floor(tonumber(hex:sub(i, i + 1), 16) * k + 0.5)) end
+  return table.concat(o)
+end
+function remfx.mix(a, b, k)                                -- BGR hex blend a -> b by k (0..1)
+  local o = {}
+  for i = 1, 5, 2 do
+    local x, y = tonumber(a:sub(i, i + 1), 16), tonumber(b:sub(i, i + 1), 16)
+    o[#o + 1] = string.format("%02X", math.floor(x + (y - x) * k + 0.5))
+  end
+  return table.concat(o)
+end
+-- TOP timer (heading-tape time box + lubber/caret): rides the END RAMP stages, no timer of its own.
+-- jade -> (caution zone + S1) steady amber -> (S2/S3) amber<->rust eased pulse on the REM breath
+-- phase -> (FINAL) rust breathing at the final period. Paused: remfx.ph stops, so the colour holds.
+function remfx.tcol(pos, dur)
+  if not dur or dur <= 0 or is_live() then return ACCENT end
+  local _, c = remfx.state(pos, dur)
+  local st = c.stage
+  if st == 0 then return c.scol == AMBER and AMBER or ACCENT end
+  if st == 1 then return AMBER end
+  local wv = 0.5 - 0.5 * math.cos((remfx.ph or 0) * 2 * math.pi)   -- 0 = REM bright, 1 = REM dim
+  if st >= 4 then return remfx.dimc(RUST, 1 - remfx.ramp.depth[4] * 0.6 * wv) end
+  local lo, hi = (st == 2) and 0 or 0.4, (st == 2) and 0.6 or 1
+  return remfx.mix(AMBER, RUST, lo + (hi - lo) * wv)
+end
+function remfx.state(pos, dur)
+  local paused = mp.get_property_bool("pause")
+  dur = dur or 0
+  local cur = remfx.cur(pos)
+  local rem = math.max(0, dur - cur)
+  local R = remfx.ramp
+  local c = { label = "REM", rem = rem, stage = 0 }
+  if dur > 0 then
+    for i, e in ipairs(R.stages) do if rem <= remfx.ramp_t(e, dur) then c.stage = math.max(c.stage, i) end end
+    c.nextwin = rem <= remfx.ramp_t(R.next, dur)
+    if c.nextwin then c.stage = 4 end
+  end
+  if c.stage > 0 then
+    c.vcol, c.ocol, c.othick, c.scol = ALERT, ALERT, c.stage >= 4 and 3 or 2, ALERT
+    if not paused and not hud.light then                   -- eased breath (COMBAT only, while playing)
+      local now = mp.get_time()
+      local dt = math.min(0.2, math.max(0, now - (remfx.pt or now))); remfx.pt = now
+      remfx.ph = ((remfx.ph or 0) + dt / R.period[c.stage]) % 1   -- phase carries over stage changes: no jumps
+      local k = 1 - R.depth[c.stage] * (0.5 - 0.5 * math.cos(remfx.ph * 2 * math.pi))
+      c.vcol = remfx.dimc(ALERT, k); c.ocol = c.vcol
+    end
+  elseif dur > 0 and rem <= remfx.ramp_t(R.amber, dur) then c.vcol, c.ocol, c.othick, c.scol = AMBER, AMBER, 2, AMBER
+  else c.vcol, c.scol = ACCENT, ACCENT end
+  local fn, fc = mp.get_property_number("estimated-frame-number"), mp.get_property_number("estimated-frame-count")
+  if fn then c.frm = string.format("FRM %06d", fn) .. (fc and string.format("/%06d", fc) or "") end
+  return rem, c
+end
+function remfx.sync()   -- 25 Hz only while the f22 HUD is visible and playing; LIVE fullscreen tape: 10 Hz scroll
+  local base = state.visible and style == "f22" and not hud.light and not mp.get_property_bool("pause")
+  local lv = base and is_live()
+  local rate = lv and (mp.get_property_bool("fullscreen") and 0.1 or nil)
+    or ((base and (mp.get_property_number("duration") or 0) > 0) and 1 / 25 or nil)
+  if remfx.timer and remfx.rate ~= rate then remfx.timer:kill(); remfx.timer = nil end
+  if rate and not remfx.timer then remfx.timer = mp.add_periodic_timer(rate, want) end
+  remfx.rate = rate
+end
+local function draw_fs(ass, p, b, w, h, pos, dur)
+  local u, fs, lf = p.u, p.fs, p.lf or math.floor(p.fs * 0.7)
+  -- 1. screen frame: hairline + jade corner brackets, inside the safe margin
+  local mx, my = math.floor(p.side * 0.45), math.floor(p.bottom * 0.45)
+  local L = math.floor(u * 1.6)
+  shape(ass, "FFFFFF", 0xD8, function(d) outline(d, mx, my, w - 2 * mx, h - 2 * my, 1) end)
+  shape(ass, ACCENT, 0x10, function(d)
+    for _, c in ipairs({ { mx, my, 1, 1 }, { w - mx, my, -1, 1 }, { mx, h - my, 1, -1 }, { w - mx, h - my, -1, -1 } }) do
+      local x, y, sx, sy = c[1], c[2], c[3], c[4]
+      d:rect_cw(math.min(x, x + sx * L), math.min(y, y + sy * 2), math.max(x, x + sx * L), math.max(y, y + sy * 2))
+      d:rect_cw(math.min(x, x + sx * 2), math.min(y, y + sy * L), math.max(x, x + sx * 2), math.max(y, y + sy * L))
+    end
+  end)
+  local LV = is_live()
+  if (not dur or dur <= 0) and not LV then return end
+  pos = pos or 0
+  if pos ~= pos or math.abs(pos) == math.huge then pos = 0 end
+  if LV then remfx.live_dur = dur; if not dur or dur <= 0 then dur = math.max(pos, 1) end end   -- LIVE: tapes end at "now"
+  local long = dur >= 3600
+  -- 2. heading tape: +/- 60 s around now, click = seek there
+  local r = b.htape
+  if r then
+    local span = 120
+    local pxs = r.w / span; r.pxs = pxs
+    local cx, base = r.x + r.w / 2, r.y + r.h - 2
+    local hot = state.hot == "htape"
+    shape(ass, INK, 0x90, function(d) d:rect_cw(r.x - lf, r.y, r.x + r.w + lf, base + 2) end)
+    shape(ass, "FFFFFF", hot and 0x70 or 0xA0, function(d) d:rect_cw(r.x, base, r.x + r.w, base + 1) end)
+    local t0 = math.ceil((pos - span / 2) / 5) * 5
+    local past, ahead = {}, {}
+    for t = t0, pos + span / 2, 5 do
+      if t >= 0 and t <= dur then
+        local x = math.floor(cx + (t - pos) * pxs)
+        local len = (t % 30 == 0) and math.floor(r.h * 0.42) or ((t % 15 == 0) and math.floor(r.h * 0.28) or math.floor(r.h * 0.16))
+        local list = t <= pos and past or ahead
+        list[#list + 1] = { x, len }
+        if t % 30 == 0 and math.abs(x - cx) > lf * 3 then
+          mtext(ass, x, base - len - math.floor(lf * 0.3), lf, t <= pos and ACCENT or "FFFFFF", t <= pos and 0x10 or 0x50, lbl_t(t, long), 2, "\\fsp0")
+        end
+      end
+    end
+    shape(ass, "FFFFFF", 0x70, function(d) for _, k in ipairs(ahead) do d:rect_cw(k[1], base - k[2], k[1] + 2, base) end end)
+    if #past > 0 then shape(ass, ACCENT, 0x20, function(d) for _, k in ipairs(past) do d:rect_cw(k[1], base - k[2], k[1] + 2, base) end end) end
+    -- centre lubber line + caret + boxed now (colour follows the END RAMP: remfx.tcol)
+    local k = math.floor(u * 0.22)
+    local TC = remfx.tcol(pos, dur)
+    shape(ass, TC, 0x00, function(d)
+      d:rect_cw(cx - 1, r.y, cx + 1, base + 2)
+      tri(d, cx - k, base + 2 + k, cx + k, base + 2 + k, cx, base + 3)
+    end)
+    local bw, bh = math.floor(fs * 6.2), math.floor(fs * 1.5)
+    shape(ass, INK, 0x20, function(d) d:rect_cw(cx - bw / 2, base + 4 + k, cx + bw / 2, base + 4 + k + bh) end)
+    shape(ass, TC, 0x00, function(d) outline(d, math.floor(cx - bw / 2), base + 4 + k, bw, bh, 2) end)
+    mtext(ass, cx, base + 4 + k + bh / 2, math.floor(fs * 1.05), "FFFFFF", 0x00, (tms(remfx.cur(pos), math.floor(fs * 1.05), 0x50)), 5, "\\fsp1")
+    mtext(ass, r.x, base + 4 + k + bh / 2, lf, "FFFFFF", 0x70, "-60s", 4, "\\fsp2")
+    mtext(ass, r.x + r.w, base + 4 + k + bh / 2, lf, "FFFFFF", 0x70, "+60s", 6, "\\fsp2")
+  end
+  -- 3. VOL tape (left, airspeed style): drag / click sets volume
+  local vr = b.vtape
+  if vr then
+    local vol, muted = mp.get_property_number("volume") or 0, mp.get_property_bool("mute")
+    local VC = muted and RUST or ACCENT
+    local HI = 80                                        -- upper zone 80-100: muted amber, like a gauge's caution arc
+    local PC = muted and RUST or (vol > HI and AMBER or ACCENT)   -- pointer box: amber above 80 (rust stays mute)
+    local bx = vr.x + vr.w                               -- baseline on the inner edge
+    local y1, y0 = vr.y + vr.h, vr.y
+    local function vy(v) return math.floor(y1 - math.max(0, math.min(100, v)) / 100 * vr.h) end
+    shape(ass, INK, 0x90, function(d) d:rect_cw(vr.x - math.floor(lf * 0.6), y0 - math.floor(fs * 1.7), bx + 1, y1 + math.floor(fs * 1.8)) end)
+    local vhot = state.hot == "vtape" or state.vdrag == "vtape"
+    if vhot and vr.grab then                         -- hover: the whole grab area lights up (corner brackets)
+      local gr = vr.grab
+      shape(ass, ACCENT, 0x70, function(d) outline(d, gr.x, gr.y, gr.w, gr.h, 1) end)
+      shape(ass, ACCENT, 0x10, function(d) ticks(d, gr.x, gr.y, gr.w, gr.h, 2, math.floor(fs * 0.8)) end)
+    end
+    shape(ass, vhot and ACCENT or "FFFFFF", vhot and 0x00 or 0x90, function(d) d:rect_cw(bx - (vhot and 2 or 1), y0, bx, y1) end)
+    local function vticks(lo, hi) return function(d)
+      for v = lo, hi, 5 do
+        local len = (v % 10 == 0) and math.floor(vr.w * 0.5) or math.floor(vr.w * 0.25)
+        local y = vy(v); d:rect_cw(bx - len, y, bx, y + 2)
+      end
+    end end
+    shape(ass, "FFFFFF", 0x70, vticks(0, HI - 5))
+    shape(ass, AMBER, 0x30, function(d)                  -- caution zone: amber ticks + thin band on the column edge
+      vticks(HI, 100)(d); d:rect_cw(bx - 2, vy(100), bx, vy(HI))
+    end)
+    if muted then
+      shape(ass, VC, 0x40, function(d) d:rect_cw(bx - 4, vy(vol), bx, y1) end)
+    else
+      shape(ass, ACCENT, 0x00, function(d) d:rect_cw(bx - 4, math.max(vy(vol), vy(HI)), bx, y1) end)
+      if vol > HI then shape(ass, AMBER, 0x00, function(d) d:rect_cw(bx - 4, vy(vol), bx, vy(HI)) end) end
+    end
+    for v = 0, 100, 20 do
+      local hz = v >= HI
+      mtext(ass, bx - math.floor(vr.w * 0.6), vy(v), lf, hz and AMBER or "FFFFFF", hz and 0x10 or 0x50, tostring(v), 6, "\\fsp0")
+    end
+    mtext(ass, vr.x, y0 - math.floor(fs * 1.0), math.floor(fs * 0.85), VC, 0x00, "VOL", 4, "\\fsp3")
+    mtext(ass, vr.x, y1 + math.floor(fs * 1.1), lf, muted and RUST or "FFFFFF", muted and 0x00 or 0x60, muted and "MUTED" or "AUDIO", 4, "\\fsp2")
+    local pbh = math.floor(fs * 1.6)
+    if vhot and not state.vdrag and state.my and math.abs(state.my - vy(vol)) > pbh * 0.6 then   -- ghost: value under the cursor
+      local gy = math.max(y0, math.min(y1, state.my))
+      shape(ass, ACCENT, 0x50, function(d) d:rect_cw(vr.x, gy - 1, bx, gy + 1) end)
+      ptr_box(ass, bx + 2, gy, 1, string.format("%03d", math.floor(clamp01((y1 - gy) / vr.h) * 100 + 0.5)),
+        math.floor(fs * 1.0), ACCENT, math.floor(fs * 3.0), math.floor(fs * 1.3), "ghost")
+    end
+    ptr_box(ass, bx + 2, vy(vol), 1, muted and "MUT" or string.format("%03d", math.floor(vol + 0.5)),
+      math.floor(fs * 1.15), PC, math.floor(fs * 3.0), pbh, vhot and "hot" or nil, PC == AMBER and AMBER or nil)
+  end
+  -- 4. REM tape (right, altitude style): COUNTDOWN. Remaining time is the altitude: the pointer
+  -- descends to T-00:00 at the bottom; labels are remaining time. Drag / click seeks to dur - rem.
+  local tr = b.ttape
+  if tr and LV then   -- LIVE tape: no end, no countdown. Watch time climbs (tape scrolls down, 5 s
+    -- ticks), the ON AIR index box reads elapsed watch time, the foot reads how far behind the live
+    -- edge you are (DVR streams) or the buffer. Click = jump to the live edge.
+    local bx, y0, y1 = tr.x, tr.y, tr.y + tr.h
+    local thot = state.hot == "ttape"
+    local abs = remfx.cur(pos)
+    local pth = mp.get_property("path") or ""
+    if live.p0k ~= pth then live.p0k, live.p0 = pth, abs end      -- watch time counts from where you joined
+    local cur = math.max(0, abs - (live.p0 or abs))
+    local span = math.max(60, math.floor(tr.h / (fs * 0.5)))          -- seconds shown over the column
+    local ny = y0 + math.floor(tr.h * 0.35)                            -- "now" index: a third of future above
+    local pps = tr.h / span
+    local paused = mp.get_property_bool("pause")
+    local LC = paused and AMBER or ACCENT
+    if thot and tr.grab then
+      local gr = tr.grab
+      shape(ass, ACCENT, 0x70, function(d) outline(d, gr.x, gr.y, gr.w, gr.h, 1) end)
+    end
+    shape(ass, INK, 0x90, function(d) d:rect_cw(bx, y0 - math.floor(fs * 1.7), tr.x + tr.w + math.floor(lf * 0.6), y1 + math.floor(fs * 1.8)) end)
+    shape(ass, thot and ACCENT or "FFFFFF", thot and 0x00 or 0x90, function(d) d:rect_cw(bx, y0, bx + (thot and 2 or 1), y1) end)
+    local past, ahead = {}, {}
+    local tlo, thi = cur - (y1 - ny) / pps, cur + (ny - y0) / pps
+    for t = math.ceil(tlo / 5) * 5, thi, 5 do
+      if t >= 0 then
+        local y = math.floor(ny + (cur - t) * pps)
+        local isM = t % 30 == 0
+        local len = isM and math.floor(tr.w * 0.5) or math.floor(tr.w * 0.25)
+        local list = t <= cur and past or ahead
+        list[#list + 1] = { y, len }
+        if isM and t <= cur and math.abs(y - ny) > fs * 1.2 then
+          mtext(ass, bx + math.floor(tr.w * 0.6), y, lf, ACCENT, 0x10, lbl_t(t, cur >= 3600), 4, "\\fsp0")
+        end
+      end
+    end
+    if #ahead > 0 then shape(ass, "FFFFFF", 0xB0, function(d) for _, k in ipairs(ahead) do d:rect_cw(bx, k[1], bx + k[2], k[1] + 2) end end) end
+    if #past > 0 then shape(ass, ACCENT, 0x20, function(d) for _, k in ipairs(past) do d:rect_cw(bx, k[1], bx + k[2], k[1] + 2) end end) end
+    shape(ass, LC, 0x00, function(d) d:rect_cw(bx, ny, bx + 4, y1) end)                 -- watched bar
+    shape(ass, ALERT, paused and 0x60 or 0x00, function(d) d:rect_cw(tr.x + tr.w - math.floor(fs * 4.6), y0 - math.floor(fs * 1.35),
