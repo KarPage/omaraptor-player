@@ -14,7 +14,7 @@
   <a href="https://omaraptor.vercel.app">Website</a>
 </p>
 
-Copy a link, press <kbd>Super</kbd>+<kbd>Alt</kbd>+<kbd>Y</kbd>, press FIRE, and the video plays in a frameless, pinned 16:9 window. The first player opens in the middle of the screen; more players park in the free corners. It is mpv and yt-dlp underneath, so it starts fast, uses hardware decoding and stays light on battery. Built for [Omarchy](https://omarchy.org) on Hyprland.
+Copy a link, press <kbd>Super</kbd>+<kbd>Alt</kbd>+<kbd>Y</kbd>, press FIRE, and the video plays in a frameless floating 16:9 window. It opens unpinned, on the workspace where you started it, floating over the tiles there. The first player opens in the middle of the screen; more players park in the free corners. It is mpv and yt-dlp underneath, so it starts fast, uses hardware decoding and stays light on battery. Built for [Omarchy](https://omarchy.org) on Hyprland.
 
 <p align="center">
   <img src="media/demo.gif" alt="Demo: a link plays from the clipboard, the HUD goes fullscreen, the signal meter mutes and unmutes, the scope locks on the rocket and COMBAT MODE engages" width="720">
@@ -31,7 +31,8 @@ Copy a link, press <kbd>Super</kbd>+<kbd>Alt</kbd>+<kbd>Y</kbd>, press FIRE, and
 - **Fullscreen cockpit.** Fullscreen adds a heading tape, VOL and REM side tapes, a top time box and a scope that locks on the picture when you pause.
 - **End-of-video ramp.** The timers turn amber, then red, and a NEXT card shows what plays next.
 - **Progress ring** around the play button, 24 ticks from twelve o'clock.
-- **PIN mode.** The frame and bar stay up as a living frame. Press <kbd>P</kbd> or the PIN tile.
+- **PIN.** Off by default. Press <kbd>P</kbd> or the PIN tile and the window follows you onto every workspace, on top of everything, and the frame stays up. The tile lights jade while that is on. Fullscreen works either way.
+- **NIGHT.** Press <kbd>n</kbd> or the NIGHT tile to cycle Off, Dim and Dimmer. The picture stays visible and goes warm and soft. Audio does not change and the stream does not rebuffer. The HUD dims a step with it, and the last level is remembered.
 - **LIVE mode** for streams with no end: the ring and timers switch to a live readout. In fullscreen the right tape shows how far you are behind the live edge.
 - **Key hints on demand.** Press `?` for every key. Its KEY HINTS switch (or `T`) shows the key letters on the buttons at once. They are off by default.
 - **Many players at once.** Each link opens its own window in a free corner. The `+` button opens an empty NO SIGNAL / PASTE LINK player centred over the one you clicked. Size, move, fullscreen and close any of them from the keyboard, even when another app has focus.
@@ -71,7 +72,9 @@ This adds a video button to your bar. Left-click plays the copied link, right-cl
 git clone https://github.com/KarPage/omaraptor-player && cd omaraptor-player && ./install.sh
 ```
 
-The installer puts `omaraptor` in `~/.local/bin`, the player config in `~/.config/omaraptor`, and window rules and key binds in `~/.config/hypr/omaraptor.lua`. It asks before it adds one line, `require("hypr.omaraptor")`, to `~/.config/hypr/hyprland.lua`, and it backs that file up first. Every file it replaces gets a `.bak-omaraptor-<time>` copy. Your own `script-opts` are kept on update. Nothing is downloaded and nothing runs as root.
+The installer puts `omaraptor` in `~/.local/bin`, the player config in `~/.config/omaraptor`, and window rules and key binds in `~/.config/hypr/omaraptor.lua`. It asks before it adds one line, `require("hypr.omaraptor")`, to `~/.config/hypr/hyprland.lua`, and it backs that file up first. Every file it replaces is copied to `<name>.bak-omaraptor-YYYYMMDDHHMMSS` first. Your own `script-opts` are kept on update (a missing `night=` line is added). Nothing is downloaded and nothing runs as root.
+
+A running player is never killed and never sent `quit`. If it is already running this HUD, the installer reloads the HUD in place and the video keeps playing. A player started from an older HUD keeps playing, and the new HUD, keys and night level apply the next time it opens. Hyprland rules reload now, so the next window opens unpinned; a window that is already open keeps its current pin until you toggle PIN or open it again. `input.conf` and `mpv.conf` are read when mpv starts.
 
 You need `mpv`, `yt-dlp`, `socat`, `jq`, `wl-clipboard` and `hyprctl`. On Omarchy:
 
@@ -137,7 +140,8 @@ The uninstaller removes only the files it installed and the one `require` line. 
 | <kbd>m</kbd> | Mute |
 | <kbd>↑</kbd> <kbd>Wheel up</kbd> | Volume up |
 | <kbd>↓</kbd> <kbd>Wheel down</kbd> | Volume down |
-| <kbd>n</kbd> | Next video |
+| <kbd>n</kbd> | Night: off, dim, dimmer |
+| <kbd>]</kbd> | Next video |
 | <kbd>N</kbd> | Previous video |
 | <kbd>r</kbd> | Repeat on / off |
 | <kbd>i</kbd> | Link info |
@@ -151,7 +155,7 @@ The uninstaller removes only the files it installed and the one `require` line. 
 | <kbd>c</kbd> | Subtitles |
 | <kbd>q</kbd> | Close |
 | <kbd>h</kbd> <kbd>H</kbd> | MASTER ARM panel: CRUISE / COMBAT |
-| <kbd>p</kbd> | PIN on / off |
+| <kbd>p</kbd> | PIN on every workspace, and back |
 | <kbd>?</kbd> | Keyboard and mouse panel |
 | Click / drag / double-click | Play or pause / move the window / fullscreen |
 <!-- /keymap -->
@@ -168,7 +172,7 @@ The uninstaller removes only the files it installed and the one `require` line. 
 | Direct files and HLS | `.mp4`, `.webm`, `.mkv`, `.m3u8` and other links mpv can open. |
 | Live streams and webcams | Any live HLS link, in LIVE mode. |
 
-Vimeo and Reddit do not work, because they need a login. To play videos that need your YouTube login (age-gated or members-only), uncomment the `cookies-from-browser` line in `~/.config/omaraptor/mpv.conf`. It is off by default.
+Public Vimeo links are accepted from the clipboard. Playback still depends on yt-dlp, and a video that needs a Vimeo login does not play. Reddit does not work, because it needs a login. To play videos that need your YouTube login (age-gated or members-only), uncomment the `cookies-from-browser` line in `~/.config/omaraptor/mpv.conf`. It is off by default.
 
 ## Settings
 
@@ -179,7 +183,8 @@ Vimeo and Reddit do not work, because they need a login. To play videos that nee
 | `timeout` | `7` | Seconds without mouse movement before the bar fades (it stays while paused). |
 | `accent` | `2EE6A6` | Accent colour, RRGGBB (jade). |
 | `size` | `1.0` | Overall HUD scale. |
-| `pin` | `no` | `yes` starts every player in PIN mode. |
+| `pin` | `no` | `yes` starts pinned on every workspace, with the frame kept up. The window rule itself opens unpinned. |
+| `night` | `off` | `off`, `dim` or `dimmer`. `n` and the NIGHT tile cycle it, and the last level is written back here. |
 
 ## Privacy
 
