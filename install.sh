@@ -6,7 +6,8 @@
 #
 # Installs ~/.local/bin/omaraptor, ~/.config/omaraptor (your script-opts are kept),
 # ~/.config/hypr/omaraptor.lua plus one require line, a .desktop entry and icons.
-# Every file it replaces is backed up first. Nothing is downloaded.
+# Every file it replaces is copied to <file>.bak-omaraptor-<YYYYMMDDHHMMSS> first.
+# Nothing is downloaded. A running player is never killed and never sent "quit".
 # Needs: mpv, yt-dlp, socat, jq, wl-clipboard, hyprctl.
 set -euo pipefail
 SRC=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)
@@ -25,8 +26,14 @@ put "$SRC/bin/omaraptor" "$BIN/omaraptor" 755
 for f in mpv.conf input.conf scripts/omaraptor-hud.lua scripts/omaraptor-autoplay.lua; do
   put "$SRC/config/$f" "$CFG/omaraptor/$f" 644
 done
-[[ -f $CFG/omaraptor/script-opts/omaraptor-hud.conf ]] ||
-  put "$SRC/config/script-opts/omaraptor-hud.conf" "$CFG/omaraptor/script-opts/omaraptor-hud.conf" 644
+opts=$CFG/omaraptor/script-opts/omaraptor-hud.conf
+if [[ ! -f $opts ]]; then
+  put "$SRC/config/script-opts/omaraptor-hud.conf" "$opts" 644
+elif ! grep -q '^night=' "$opts"; then
+  cp -p "$opts" "$opts.bak-omaraptor-$STAMP"
+  say "backup $opts.bak-omaraptor-$STAMP"
+  printf '\n# NIGHT: off | dim | dimmer. The NIGHT tile and the n key cycle it.\nnight=off\n' >> "$opts"
+fi
 cp "$SRC/VERSION" "$CFG/omaraptor/.installed-version"
 
 # Hyprland: window rules + key binds live in their own file, loaded by one line.
@@ -57,4 +64,41 @@ put "$SRC/share/icons/omaraptor.svg" "$DATA/icons/hicolor/scalable/apps/omarapto
 for s in 48 128 256; do put "$SRC/share/icons/omaraptor-$s.png" "$DATA/icons/hicolor/${s}x${s}/apps/omaraptor.png" 644; done
 command -v update-desktop-database >/dev/null && update-desktop-database "$DATA/applications" 2>/dev/null || true
 command -v hyprctl >/dev/null && hyprctl reload >/dev/null 2>&1 || true
-echo "done. Copy a video link and press SUPER+ALT+Y, or search \"OmaRaptor\" in the app launcher."
+
+# Reload the HUD in players that already speak this installer's reload handshake.
+# Never quit, never signal. A player started from an older HUD has no handshake:
+# its picture keeps playing and the new HUD is used the next time it opens.
+# input.conf and mpv.conf are read when mpv starts, so a brand-new key waits for that too.
+reload_hud() {
+  local dir sock resp api n=0 any=0
+  if ! command -v socat >/dev/null || ! command -v jq >/dev/null; then
+    say "HUD, keys and night level apply the next time a player opens."
+    return 0
+  fi
+  dir=${XDG_RUNTIME_DIR:-/tmp}
+  shopt -s nullglob
+  for sock in "$dir"/omaraptor-*.sock; do
+    [[ -S $sock ]] || continue
+    any=1
+    resp=$(printf '%s\n' '{"command":["get_property","user-data/omaraptor-hud-api"]}' | socat -t0.4 - "UNIX-CONNECT:$sock" 2>/dev/null || true)
+    api=$(printf '%s' "$resp" | jq -r 'select(.error=="success") | .data // empty' 2>/dev/null || true)
+    [[ $api == 1 ]] || continue
+    printf '%s\n' '{"command":["script-message","omaraptor-hud","standby"]}' | socat -t0.4 - "UNIX-CONNECT:$sock" >/dev/null 2>&1 || true
+    sleep 0.2
+    jq -n --arg f "$CFG/omaraptor/scripts/omaraptor-hud.lua" '{command:["load-script",$f]}' |
+      socat -t1 - "UNIX-CONNECT:$sock" >/dev/null 2>&1 || true
+    n=$((n+1))
+  done
+  if ((n > 0)); then
+    say "reloaded the HUD in $n running player(s). They were left playing."
+  elif ((any)); then
+    say "left running players playing. The new HUD, keys and night level apply the next time they open."
+  else
+    say "no player is open. The new HUD is used the next time one opens."
+  fi
+}
+reload_hud
+
+echo "done. New windows open unpinned (PIN in the HUD follows you across workspaces)."
+echo "Hyprland rules are reloaded. Copy a link and press SUPER+ALT+Y, or search \"OmaRaptor\"."
+echo "Replaced files were copied to <name>.bak-omaraptor-$STAMP first."

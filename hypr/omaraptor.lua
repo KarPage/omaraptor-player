@@ -1,13 +1,17 @@
--- OmaRaptor Player (omaraptor): frameless, pinned, floating 16:9 YouTube player.
+-- OmaRaptor Player (omaraptor): frameless floating 16:9 player.
 -- Load it with one line at the end of ~/.config/hypr/hyprland.lua:
 --   require("hypr.omaraptor")
 -- Remove that line (and this file) to undo everything.
+--
+-- Unpinned by default: the window stays on the workspace where it opened and
+-- floats over the tiles there. The HUD PIN tile (or P) pins it so it follows
+-- you onto every workspace, on top. Fullscreen works in both states.
 
 -- mpv player. A dedicated app id keeps it out of Omarchy's centered mpv rules.
-o.window("^omaraptor$", {
+o.window("^(omaraptor|ytfloat)$", {   -- ytfloat: windows opened before the rename
   tag = "-default-opacity",
   float = true,
-  pin = true,                -- follows you to every workspace
+  pin = false,               -- stays in its own workspace (floats over its tiles)
   keep_aspect_ratio = true,  -- SUPER+right-drag resize stays 16:9
   -- no border_size: same thin frame as every other window (general border + colors)
   no_shadow = true,
@@ -24,7 +28,7 @@ o.window("^omaraptor$", {
 -- First player: "omaraptor" titles it "OmaRaptor Player | ..." when no other player is open, so it
 -- maps centred at 60% of the screen width from its very first frame (no corner flash). The
 -- launcher restores the normal title right after; later players keep the corner rule above.
-o.window({ class = "^omaraptor$", initial_title = "^OmaRaptor Player \\| .*" }, {
+o.window({ class = "^(omaraptor|ytfloat)$", initial_title = "^OmaRaptor Player \\| .*" }, {
   size = { "(monitor_w*60/100)", "(monitor_w*60/100*9/16)" },
   center = true,
 })
@@ -66,8 +70,9 @@ o.bind("SUPER + ALT + PERIOD", "OmaRaptor: next video", omaraptor .. " next")
 -- switch, so it's global; the grab zone is Hyprland's default 15 px around each window.
 -- The omaraptor rule above keeps 16:9 while you drag. Delete these lines to turn it off again.
 hl.config({ general = { resize_on_border = true } })
--- Hyprland refuses fullscreen on pinned windows by default; omaraptor is pinned, so allow it
--- (double-click, f, and SUPER+CTRL+ALT+F all need this).
+-- Hyprland blocks fullscreen on a pinned window unless this is on. PIN is off by default
+-- and the HUD can turn it on, so fullscreen has to work both pinned and unpinned
+-- (double-click, f, and SUPER+CTRL+ALT+F).
 hl.config({ binds = { allow_pin_fullscreen = true } })
 
 -- Playback, from anywhere (mpv does not need focus; sent over its IPC socket).
