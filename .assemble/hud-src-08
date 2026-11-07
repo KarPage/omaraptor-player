@@ -1,0 +1,527 @@
+local function arm_rearm()            -- 5 s inactivity cancels (not once the switch is thrown)
+  if arm.to then arm.to:kill() end
+  arm.to = mp.add_timeout(5, function() arm.to = nil; if not arm.flipped then arm_close() end end)
+end
+local function power_on()             -- COMBAT: staggered power-on, ~0.5 s, then the scope's intro blink
+  hud.boot = mp.get_time()
+  if arm.bt then arm.bt:kill() end
+  arm.bt = mp.add_periodic_timer(1 / 30, function()
+    if mp.get_time() - hud.boot >= 0.5 then
+      arm.bt:kill(); arm.bt = nil; hud.boot = nil
+      fpm_flash(mp.get_property_bool("pause"))
+    end
+    if state.visible or state.fade > 0 then want() end
+  end)
+end
+local function arm_flip()
+  if arm.flipped then return end
+  arm.flipped = true
+  if arm.to then arm.to:kill(); arm.to = nil end
+  local combat = arm.target == "combat"
+  arm.flash = { t0 = mp.get_time(), txt = combat and "COMBAT MODE ENGAGED" or "CRUISE MODE",
+    sub = combat and "HUD POWER ON" or "HUD STRIPPED  ·  LOW POWER" }
+  if combat then set_light(false, false); power_on() else set_light(true, false) end
+  show()
+  draw_arm()
+  arm.ft = mp.add_periodic_timer(1 / 20, function()                -- flash, then the panel closes
+    local t = mp.get_time() - arm.flash.t0
+    if t >= 0.95 then arm_close() else draw_arm() end
+  end)
+end
+local function arm_open()
+  if hud.card_off then hud.card_off() end
+  arm_kill()
+  arm.open, arm.target, arm.guard, arm.flipped, arm.flash = true, hud.light and "combat" or "cruise", false, false, nil
+  local w, h = mp.get_osd_size()
+  mp.set_mouse_area(0, 0, w or 10000, h or 10000, ARM_SECTION)
+  mp.input_disable_section(ARM_SECTION); mp.input_enable_section(ARM_SECTION)   -- on top of bar / tips / video
+  arm_rearm(); show(); draw_arm()
+end
+arm_toggle = function() if arm.open then arm_close() else arm_open() end end
+local function arm_enter()
+  if not arm.open or arm.flipped then return end
+  if arm.target == "combat" and not arm.guard then
+    arm.guard = true; draw_arm()
+    arm.dt = mp.add_timeout(0.18, function() arm.dt = nil; arm_flip() end)   -- guard up, then the switch
+  else arm_flip() end
+end
+local function arm_press(x, y)
+  if not arm.open or arm.flipped or not arm.g then return end
+  local g, pad = arm.g, math.floor(arm.g.u * 0.3)
+  local function within(r) return x >= r.x - pad and x < r.x + r.w + pad and y >= r.y - pad * 2 and y < r.y + r.h + pad end
+  if not inside(g, x, y) then arm_close(); return end                  -- click outside: cancel
+  arm_rearm()
+  if arm.target == "combat" and not arm.guard then
+    if within(g.gd) then arm.guard = true; draw_arm() end
+  elseif within(g.sw) then arm_flip() end                               -- press (or the start of a drag up) flips
+end
+mp.add_key_binding(nil, "arm-click", function(e)
+  if e.event ~= "down" and e.event ~= "press" then return end
+  local m = mp.get_property_native("mouse-pos")
+  if m then arm_press(m.x, m.y) end
+end, { complex = true })
+mp.add_key_binding(nil, "arm-cancel", arm_close)
+mp.add_key_binding(nil, "arm-enter", arm_enter)
+mp.input_define_section(ARM_SECTION,
+  "MBTN_LEFT script-binding " .. me .. "/arm-click\n" ..
+  "MBTN_LEFT_DBL script-binding " .. me .. "/nop\n" ..
+  "MBTN_RIGHT script-binding " .. me .. "/arm-cancel\n" ..
+  "ESC script-binding " .. me .. "/arm-cancel\n" ..
+  "H script-binding " .. me .. "/arm-cancel\n" ..
+  "h script-binding " .. me .. "/arm-cancel\n" ..
+  "ENTER script-binding " .. me .. "/arm-enter\n" ..
+  "KP_ENTER script-binding " .. me .. "/arm-enter\n" ..
+  "SPACE script-binding " .. me .. "/arm-enter\n", "force")
+mp.add_key_binding("H", "hud-mode", arm_toggle)
+mp.add_key_binding("h", "hud-mode-h", arm_toggle)
+mp.register_script_message("hud-arm-at", function(xy)            -- tests: a press at "x y" on the panel
+  local x, y = (xy or ""):match("(%-?%d+)%s+(%-?%d+)")
+  if x then arm_press(tonumber(x), tonumber(y)) end
+end)
+mp.observe_property("osd-dimensions", "native", function()
+  if arm.open then local w, h = mp.get_osd_size(); mp.set_mouse_area(0, 0, w or 10000, h or 10000, ARM_SECTION); draw_arm() end
+end)
+end
+mp.register_script_message("hud-mode", function(m)     -- full | light | toggle (IPC / tests)
+  set_light(m == "light" or (m ~= "full" and not hud.light), true)
+end)
+mp.observe_property("osd-dimensions", "native", function()
+  if state.visible then render(); set_section(true) else refresh() end
+  if tips_open then
+    local w, h = mp.get_osd_size()
+    mp.set_mouse_area(0, 0, w, h, TIPS_SECTION)
+    render_tips()
+  end
+end)
+
+-- link prompt (empty "omaraptor new" windows) ----------------------------------------------------
+-- mpv's console line editor: Ctrl+V and Shift+Insert paste (Omarchy's Super+V sends Ctrl+V);
+-- Ctrl+Shift+V is added here. A pasted valid link starts at once, MUTED (this window only; the
+-- HUD speaker unmutes). Enter plays a typed link (sound as usual), Esc closes the empty window.
+local input_ok, input = pcall(require, "mp.input")
+local prompt = { open = false, text = "", reopen = nil, submitted = false, msg = nil }
+local hint_ov = mp.create_osd_overlay("ass-events")
+hint_ov.z = 10     -- over mpv's console line (we draw the field ourselves), under the HUD (z 20)
+local function idle_empty() return idle_empty_now() end
+local blink = { on = true, timer = nil }
+-- cockpit console (home screen + boot sequence share one layout) ---------------------------------
+-- A framed panel: header + status lamp, a 16:9 "screen" (the video plays inside it during boot),
+-- a log column, the link bar and a key footer. Pure ASS shapes, drawn only on change (idle: the
+-- 2 Hz cursor blink) or by the short boot timer.
+function prompt.layout(w, h)
+  local g = { w = w, h = h }
+  local fs = math.max(11, math.floor(math.min(h * 0.042, w * 0.024)))
+  local pad = math.floor(fs * 0.9)
+  g.fs, g.pad, g.t = fs, pad, math.max(1, math.floor(math.min(w, h) / 360 + 0.5))
+  g.px0, g.py0 = math.floor(w * 0.05), math.floor(h * 0.07)
+  g.px1, g.py1 = w - g.px0, h - g.py0
+  g.hy = g.py0 + math.floor(fs * 1.5)
+  g.footy = g.py1 - math.floor(fs * 0.95)
+  g.bh = math.floor(fs * 2.1)
+  g.bx0, g.bx1 = g.px0 + pad, g.px1 - pad
+  g.by0 = g.footy - math.floor(fs * 0.95) - g.bh
+  g.by1 = g.by0 + g.bh
+  local top, bot = g.py0 + math.floor(fs * 2.7), g.by0 - math.floor(fs * 0.8)
+  local sw = math.min((g.px1 - g.px0 - pad * 3) * 0.62, (bot - top) * 16 / 9)
+  local sh = sw * 9 / 16
+  g.sx0 = g.px0 + pad; g.sx1 = math.floor(g.sx0 + sw)
+  g.sy0 = math.floor(top + (bot - top - sh) / 2); g.sy1 = math.floor(g.sy0 + sh)
+  g.lx, g.ly0, g.lx1 = g.sx1 + pad, top, g.px1 - pad
+  g.lf = math.max(10, math.floor(fs * 0.62))
+  return g
+end
+-- o: fade (alpha added to all, 0 solid), hole {x0,y0,x1,y1} (left open for the video), fill (idle
+-- screen), label/sub (screen text), scan (scanline alpha), lines ({{txt,col,al}..}),
+-- bar (segments), barcol, status, lamp (colour or nil), foot (segments)
+function prompt.panel(ass, g, o)
+  local fa, t, fs = o.fade or 0, g.t, g.fs
+  local function A(al) return math.min(255, al + fa) end
+  local function box(x0, y0, x1, y1, col, al)
+    if x1 <= x0 or y1 <= y0 or A(al) >= 255 then return end
+    ass:new_event()
+    ass:append(string.format("{\\an7\\pos(0,0)\\bord0\\shad0\\1c&H%s&\\1a&H%02X&\\p1}", col, A(al)))
+    ass:draw_start(); ass:rect_cw(x0, y0, x1, y1); ass:draw_stop()
+  end
+  local function frame(x0, y0, x1, y1, th, col, al)
+    box(x0, y0, x1, y0 + th, col, al); box(x0, y1 - th, x1, y1, col, al)
+    box(x0, y0 + th, x0 + th, y1 - th, col, al); box(x1 - th, y0 + th, x1, y1 - th, col, al)
+  end
+  local function brackets(x0, y0, x1, y1, th, len, col, al)
+    box(x0, y0, x0 + len, y0 + th, col, al); box(x0, y0, x0 + th, y0 + len, col, al)
+    box(x1 - len, y0, x1, y0 + th, col, al); box(x1 - th, y0, x1, y0 + len, col, al)
+    box(x0, y1 - th, x0 + len, y1, col, al); box(x0, y1 - len, x0 + th, y1, col, al)
+    box(x1 - len, y1 - th, x1, y1, col, al); box(x1 - th, y1 - len, x1, y1, col, al)
+  end
+  local function segs(list)
+    local s = ""
+    for _, p in ipairs(list) do
+      s = s .. string.format("{\\1c&H%s&\\1a&H%02X&}", p[2] or "FFFFFF", A(p[3] or 0)) .. (p[1]:gsub("[{}\\]", ""))
+    end
+    return s
+  end
+  local function txt(x, y, an, f, list, extra)
+    if fa >= 250 then return end
+    ass:new_event()
+    ass:append(string.format("{\\an%d\\pos(%d,%d)\\fn%s\\fs%d\\bord0\\shad0\\q2\\fsp1%s}", an, x, y, MONO, f, extra or "") .. segs(list))
+  end
+  local w, h, hl = g.w, g.h, o.hole
+  if hl then   -- ink all round the open screen
+    box(0, 0, w, hl[2], INK, 0); box(0, hl[4], w, h, INK, 0)
+    box(0, hl[2], hl[1], hl[4], INK, 0); box(hl[3], hl[2], w, hl[4], INK, 0)
+  else box(0, 0, w, h, INK, 0) end
+  frame(g.px0, g.py0, g.px1, g.py1, t, ACCENT, 0x90)
+  brackets(g.px0, g.py0, g.px1, g.py1, t * 2, math.floor(fs * 1.4), ACCENT, 0x10)
+  txt(g.px0 + g.pad, g.hy, 4, math.floor(fs * 0.8), { { "OMARAPTOR", ACCENT, 0 }, { " PLAYER", "FFFFFF", 0x30 } }, "\\fsp3")
+  local ls = math.floor(fs * 0.55)
+  if o.lamp then box(g.px1 - g.pad - ls, g.hy - ls / 2, g.px1 - g.pad, g.hy + ls / 2, o.lamp, 0) end
+  txt(g.px1 - g.pad - ls - math.floor(fs * 0.5), g.hy, 6, g.lf, { { o.status or "", o.statcol or "FFFFFF", 0x10 } }, "\\fsp2")
+  box(g.px0 + g.pad, g.hy + math.floor(fs * 0.75), g.px1 - g.pad, g.hy + math.floor(fs * 0.75) + t, ACCENT, 0xB0)
+  -- screen
+  local sx0, sy0, sx1, sy1 = g.sx0, g.sy0, g.sx1, g.sy1
+  frame(sx0 - 2 * t, sy0 - 2 * t, sx1 + 2 * t, sy1 + 2 * t, t, ACCENT, 0x70)
+  brackets(sx0 - 3 * t, sy0 - 3 * t, sx1 + 3 * t, sy1 + 3 * t, t * 2, math.floor(fs * 0.8), ACCENT, 0x00)
+  if o.fill then box(sx0, sy0, sx1, sy1, "070A06", 0) end
+  if o.scan and A(o.scan) < 255 then      -- one shape event for every line
+    ass:new_event()
+    ass:append(string.format("{\\an7\\pos(0,0)\\bord0\\shad0\\1c&H%s&\\1a&H%02X&\\p1}", o.scancol or "000000", A(o.scan)))
+    ass:draw_start()
+    for y = sy0, sy1 - t, 3 * t do ass:rect_cw(sx0, y, sx1, y + t) end
+    ass:draw_stop()
+  end
+  if o.label then
+    local cx, cy = math.floor((sx0 + sx1) / 2), math.floor((sy0 + sy1) / 2)
+    txt(cx, cy - math.floor(fs * 0.3), 2, math.floor(fs * 0.85), o.label, "\\fsp4")
+    if o.sub then txt(cx, cy + math.floor(fs * 0.3), 8, g.lf, o.sub, "\\fsp2") end
+  end
+  -- log column
+  local y, step = g.ly0, math.floor(g.lf * 1.6)
+  for _, l in ipairs(o.lines or {}) do
+    if y > g.by0 - g.lf then break end
+    txt(g.lx, y, 7, g.lf, l); y = y + step
+  end
+  -- link bar
+  local bc = o.barcol or ACCENT
+  box(g.bx0, g.by0, g.bx1, g.by1, "FFFFFF", 0xF4)
+  frame(g.bx0, g.by0, g.bx1, g.by1, t, bc, 0x00)
+  box(g.bx0, g.by0, g.bx0 + math.max(3, t * 3), g.by1, bc, 0)
+  if o.bar then txt(g.bx0 + math.floor(fs * 0.8), math.floor((g.by0 + g.by1) / 2), 4, math.floor(fs * 0.9), o.bar) end
+  if o.foot then txt(math.floor(w / 2), g.footy, 5, g.lf, o.foot, "\\fsp1") end
+end
+function prompt.wrap(s, n)            -- word wrap for the log column
+  local out, cur = {}, ""
+  for word in s:gmatch("%S+") do
+    if #cur + #word + 1 > n and cur ~= "" then out[#out + 1] = cur; cur = word
+    else cur = cur == "" and word or (cur .. " " .. word) end
+  end
+  if cur ~= "" then out[#out + 1] = cur end
+  return out
+end
+prompt.dump = os.getenv("OMARAPTOR_TEST_DUMP")   -- tests: the drawn home screen as ASS
+prompt.foot = { { "SUPER+V", "FFFFFF", 0x30 }, { " PASTE    ", "FFFFFF", 0x98 }, { "ENTER", "FFFFFF", 0x30 },
+  { " ENGAGE    ", "FFFFFF", 0x98 }, { "ESC", "FFFFFF", 0x30 }, { " CLOSE", "FFFFFF", 0x98 } }
+-- home screen helpers (table fields: the main chunk is at the 200-locals limit)
+function prompt.R(ass, x0, y0, x1, y1, col, al)
+  if x1 <= x0 or y1 <= y0 or al >= 255 then return end
+  ass:new_event()
+  ass:append(string.format("{\\an7\\pos(0,0)\\bord0\\shad0\\1c&H%s&\\1a&H%02X&\\p1}", col, al))
+  ass:draw_start(); ass:rect_cw(math.floor(x0), math.floor(y0), math.floor(x1), math.floor(y1)); ass:draw_stop()
+end
+function prompt.T(ass, x, y, an, f, s_, col, al, extra)
+  ass:new_event()
+  ass:append(string.format("{\\an%d\\pos(%d,%d)\\fn%s\\fs%d\\bord0\\shad0\\q2\\1c&H%s&\\1a&H%02X&%s}%s",
+    an, math.floor(x), math.floor(y), MONO, math.floor(f), col, al, extra or "", (s_:gsub("[{}\\]", ""))))
+end
+-- idle gauge column under the log rows: SIGNAL / BUFFER bars all dark, tiles SAFE / STBY / HOLD
+function prompt.idle(ass, g, y, err)
+  local R, T = prompt.R, prompt.T
+  local x0, x1, u, t = g.lx, g.lx1, g.lf, math.max(1, g.t)
+  local lf2 = math.floor(u * 0.85)
+  local gx0, gx1 = x0 + math.floor(7 * (lf2 * 0.6 + 2)), x1 - math.floor(6 * (lf2 * 0.6 + 2))
+  local gh, n = math.max(6, math.floor(u * 1.2)), 16
+  local seg = (gx1 - gx0) / n
+  for _, row in ipairs({ { "SIGNAL", err and "LOST" or "--", err and ERR or "FFFFFF" }, { "BUFFER", "--", "FFFFFF" } }) do
+    if y + gh > g.sy1 then return end
+    ass:new_event()
+    ass:append(string.format("{\\an7\\pos(0,0)\\bord0\\shad0\\1c&HFFFFFF&\\1a&HE4&\\p1}"))
+    ass:draw_start()
+    for i = 0, n - 1 do ass:rect_cw(math.floor(gx0 + i * seg + t), y, math.floor(gx0 + (i + 1) * seg - t), y + gh) end
+    ass:draw_stop()
+    T(ass, x0, y + gh / 2, 4, lf2, row[1], "FFFFFF", 0x88, "\\fsp2")
+    T(ass, x1, y + gh / 2, 6, u, row[2], row[3], row[3] == ERR and 0 or 0xA0, "\\b1\\fsp1")
+    y = y + gh + math.floor(u * 1.25)
+  end
+  local yb, gap = g.sy1 + 3 * g.t, math.max(4, math.floor(u * 0.5))
+  local th = math.floor(math.min(u * 5.6, yb - y))
+  if th < u * 2.6 then return end
+  local ty, tw = yb - th, (x1 - x0 - 2 * gap) / 3
+  for i, tl in ipairs({ { "MASTER ARM", "SAFE" }, { "SEEKER", err and "LOST" or "STBY" }, { "RELEASE", "HOLD" } }) do
+    local a = x0 + (i - 1) * (tw + gap)
+    local e = err and i == 2
+    local fc, fa = e and ERR or "FFFFFF", e and 0x20 or 0xC0
+    R(ass, a, ty, a + tw, ty + t, fc, fa); R(ass, a, ty + th - t, a + tw, ty + th, fc, fa)
+    R(ass, a, ty + t, a + t, ty + th - t, fc, fa); R(ass, a + tw - t, ty + t, a + tw, ty + th - t, fc, fa)
+    local lfs = math.floor(math.min(u * 0.82, tw / (#tl[1] * 0.6 + 2.2)))
+    T(ass, a + tw / 2, ty + u * 0.55, 8, lfs, tl[1], fc, e and 0 or 0x90, "\\fsp1")
+    T(ass, a + tw / 2, ty + th * 0.62, 5, math.floor(math.min(u * 1.5, tw / 4.2)), tl[2], fc, e and 0 or 0xA8, "\\b1\\fsp2")
+  end
+end
+prompt.SEC = "omaraptor-home-paste"     -- the PASTE LINK button's click area
+local function draw_hint()
+  local w, h = mp.get_osd_size()
+  if not w or w <= 0 then return end
+  local g = prompt.layout(w, h)
+  local ass = assdraw.ass_new()
+  local R, T = prompt.R, prompt.T
+  local err = prompt.msg ~= nil
+  local fc = err and ERR or ACCENT
+  local function row(k, v, col, al) return { { string.format("%-10s", k), "FFFFFF", 0x80 }, { v, col or "FFFFFF", al or 0x18 } } end
+  local hw = (mp.get_property("hwdec", "no") or "no"):upper()
+  local lines = {
+    row("SYSTEM", "ONLINE", ACCENT),
+    row("CORE", "MPV " .. ((mp.get_property("mpv-version", "") or ""):match("[%d%.]+") or "")),
+    row("HUD MODE", hud.light and "CRUISE" or "COMBAT"),
+    row("DECODER", hw),
+    row("SIGNAL", err and "LOST" or "NONE", err and ERR or "FFFFFF", err and 0x18 or 0x60),
+  }
+  if err then
+    lines[#lines + 1] = {}
+    for _, l in ipairs(prompt.wrap(prompt.msg:upper(), math.max(12, math.floor((g.lx1 - g.lx) / (g.lf * 0.6))))) do
+      lines[#lines + 1] = { { l, ERR, 0 } }
+    end
+  end
+  local cw = g.fs * 0.9 * 0.6
+  local room = math.max(4, math.floor((g.bx1 - g.bx0 - g.fs * 2.6) / cw))
+  local s = prompt.text or ""
+  if #s > room then s = "…" .. s:sub(-(room - 1)) end
+  local cur = { "█", ACCENT, blink.on and 0x00 or 0xFF }
+  local bar = (prompt.text or "") == "" and { { "› ", fc, 0 }, cur, { " PASTE SIGNAL LINK", "FFFFFF", 0x90 } }
+    or { { "› ", fc, 0 }, { s, "FFFFFF", 0 }, cur }
+  prompt.panel(ass, g, { fill = true, scan = 0xE6, scancol = ACCENT,
+    lines = lines, bar = bar, barcol = fc, status = err and "NO SIGNAL" or "STANDBY",
+    statcol = err and ERR or "FFFFFF", lamp = err and ERR or ((blink.on or prompt.hov) and ACCENT or nil), foot = prompt.foot })
+  prompt.idle(ass, g, g.ly0 + (#lines + 0.6) * math.floor(g.lf * 1.6), err)
+  -- the screen: idle reticle, NO SIGNAL / AWAITING LINK, one big square PASTE LINK button
+  local fs, t = g.fs, g.t
+  local sx0, sy0, sx1, sy1 = g.sx0, g.sy0, g.sx1, g.sy1
+  local sw, sh = sx1 - sx0, sy1 - sy0
+  local cx = math.floor((sx0 + sx1) / 2)
+  local th = math.max(2, 2 * t)
+  local ix, iy, len = math.floor(sw * 0.07), math.floor(sh * 0.1), math.floor(fs * 1.1)
+  local a0, b0, a1, b1 = sx0 + ix, sy0 + iy, sx1 - ix, sy1 - iy
+  for _, r in ipairs({ { a0, b0, a0 + len, b0 + t }, { a0, b0, a0 + t, b0 + len }, { a1 - len, b0, a1, b0 + t }, { a1 - t, b0, a1, b0 + len },
+      { a0, b1 - t, a0 + len, b1 }, { a0, b1 - len, a0 + t, b1 }, { a1 - len, b1 - t, a1, b1 }, { a1 - t, b1 - len, a1, b1 } }) do
+    R(ass, r[1], r[2], r[3], r[4], ACCENT, 0x90)
+  end
+  local my = math.floor((sy0 + sy1) / 2)
+  R(ass, sx0 + math.floor(ix * 0.35), my - t, sx0 + ix - t * 2, my + t, ACCENT, 0xA8)      -- edge ticks
+  R(ass, sx1 - ix + t * 2, my - t, sx1 - math.floor(ix * 0.35), my + t, ACCENT, 0xA8)
+  local lf, sf = math.floor(fs * 0.85), g.lf
+  local bw = math.floor(math.min(sw * 0.62, math.max(fs * 7.5, math.min(sw * 0.46, fs * 11))))
+  local bh = math.floor(math.min(sh * 0.42, math.max(fs * 2.6, math.min(sh * 0.36, fs * 4))))
+  local stack = lf + sf + math.floor(fs * 1.1) + bh
+  local ly = math.floor(my - stack / 2)
+  T(ass, cx, ly, 8, lf, "NO SIGNAL", err and ERR or ACCENT, err and 0 or 0x50, "\\fsp4")
+  T(ass, cx, ly + lf + math.floor(fs * 0.1), 8, sf, err and "CHECK THE LINK" or "AWAITING LINK", "FFFFFF", 0x80, "\\fsp2")
+  local x0, y0 = cx - math.floor(bw / 2), ly + lf + sf + math.floor(fs * 1.1)
+  local x1, y1 = x0 + bw, y0 + bh
+  prompt.box = { x0, y0, x1, y1 }
+  local key = x0 .. " " .. y0 .. " " .. x1 .. " " .. y1
+  if key ~= prompt.akey then prompt.akey = key; mp.set_mouse_area(x0, y0, x1, y1, prompt.SEC) end
+  local hov = prompt.hov
+  R(ass, x0, y0, x1, y1, "070A06", 0x18)
+  R(ass, x0, y0, x1, y1, ACCENT, hov and 0x98 or 0xD8)
+  R(ass, x0, y0, x1, y0 + th, ACCENT, hov and 0 or 0x30); R(ass, x0, y1 - th, x1, y1, ACCENT, hov and 0 or 0x30)
+  R(ass, x0, y0 + th, x0 + th, y1 - th, ACCENT, hov and 0 or 0x30); R(ass, x1 - th, y0 + th, x1, y1 - th, ACCENT, hov and 0 or 0x30)
+  local o, bl = th * 3, math.floor(fs * 0.9)
+  for _, r in ipairs({ { x0 - o, y0 - o, x0 - o + bl, y0 - o + th }, { x0 - o, y0 - o, x0 - o + th, y0 - o + bl },
+      { x1 + o - bl, y0 - o, x1 + o, y0 - o + th }, { x1 + o - th, y0 - o, x1 + o, y0 - o + bl },
+      { x0 - o, y1 + o - th, x0 - o + bl, y1 + o }, { x0 - o, y1 + o - bl, x0 - o + th, y1 + o },
+      { x1 + o - bl, y1 + o - th, x1 + o, y1 + o }, { x1 + o - th, y1 + o - bl, x1 + o, y1 + o } }) do
+    R(ass, r[1], r[2], r[3], r[4], ACCENT, hov and 0x10 or 0x60)
+  end
+  local f = math.floor(math.min(bh * 0.36, fs * 1.45, bw / 7.5))
+  T(ass, cx, math.floor((y0 + y1) / 2 - bh * 0.1), 5, f, "PASTE LINK", hov and "FFFFFF" or "E8FFF4", hov and 0 or 0x10,
+    string.format("\\b1\\fsp%d", math.floor(f * 0.25)))
+  T(ass, cx, math.floor(y1 - bh * 0.18), 5, math.floor(g.lf * 0.9), "CLICK · SUPER+V", "FFFFFF", 0x60, "\\fsp2")
+  hint_ov.res_x, hint_ov.res_y, hint_ov.data = w, h, ass.text
+  hint_ov:update()
+  if prompt.dump then local f_ = io.open(prompt.dump, "w"); if f_ then f_:write(w, " ", h, "\n", ass.text); f_:close() end end
+end
+local function blink_stop() if blink.timer then blink.timer:kill(); blink.timer = nil end end
+local function blink_start()
+  blink_stop(); blink.on = true
+  blink.timer = mp.add_periodic_timer(0.5, function() blink.on = not blink.on; draw_hint() end)
+end
+local open_prompt
+local URL_PAT = "^https?://[%w%-%.]+%.[%a][%a]+[/%?#:]?[^%s]*$"
+local function play_link(url, muted)
+  prompt.submitted = true
+  if muted then mp.set_property_bool("mute", true) end
+  blink_stop()
+  mp.input_disable_section(prompt.SEC)
+  input.terminate()
+  hint_ov:remove()
+  mp.commandv("loadfile", url, "replace")
+end
+-- Any paste (Super+V -> Ctrl+V, Ctrl+V, Shift+Insert, Ctrl+Shift+V): typing grows the line one
+-- character at a time, a paste by many, so a jump that leaves a valid link plays it right away.
+local function on_pasted(text)
+  local url = (text or ""):gsub("%s", "")
+  if url:match(URL_PAT) then play_link(url, true); return true end
+  prompt.msg = "Not a web link. Copy a YouTube URL and paste it."; draw_hint()
+  return false
+end
+function prompt.clip()             -- the clipboard as one line (mpv's own clipboard, else wl-paste)
+  local clip = mp.get_property("clipboard/text", "")
+  if clip == "" then
+    local r = utils.subprocess({ args = { "wl-paste", "-n" }, playback_only = false, cancellable = false })
+    clip = (r and r.status == 0 and r.stdout) or ""
+  end
+  return (clip:gsub("[\r\n]", ""))
+end
+-- PASTE LINK button: the clipboard goes into the field and comes up ARMED (preloads, FIRE plays)
+function prompt.button()
+  if not prompt.open or prompt.submitted then return end
+  local url = prompt.clip():gsub("%s", "")
+  if not url:match(URL_PAT) then
+    prompt.msg = "Clipboard has no web link. Copy a YouTube URL first."; draw_hint(); return
+  end
+  prompt.text = url; draw_hint()
+  if prompt.arm then prompt.arm() end
+  play_link(url, false)
+end
+mp.add_key_binding(nil, "home-paste", function() prompt.button() end)
+mp.input_define_section(prompt.SEC, "MBTN_LEFT script-binding " .. me .. "/home-paste\n" ..
+  "MBTN_LEFT_DBL script-binding " .. me .. "/nop\n", "force")
+mp.observe_property("mouse-pos", "native", function(_, m)
+  if not prompt.open or not prompt.box then return end
+  local b = prompt.box
+  local hv = (m and m.hover and m.x >= b[1] and m.x < b[3] and m.y >= b[2] and m.y < b[4]) or false
+  if hv ~= (prompt.hov or false) then prompt.hov = hv; draw_hint() end
+end)
+local function prompt_paste()   -- Ctrl+Shift+V: append the clipboard to the line
+  if not prompt.open then return end
+  local clip = prompt.clip()
+  if prompt.text == "" and on_pasted(clip) then return end
+  prompt.reopen = prompt.text .. clip
+  prompt.reopen_msg = "That isn't a web link. Copy a YouTube URL and paste it."
+  input.terminate()
+end
+local function prompt_keys(on)
+  for _, k in ipairs({ "Ctrl+Shift+v", "Ctrl+Shift+V", "Ctrl+V" }) do
+    if on then mp.add_forced_key_binding(k, "prompt-paste-" .. k, prompt_paste)
+    else mp.remove_key_binding("prompt-paste-" .. k) end
+  end
+end
+open_prompt = function(text, msg)
+  if not input_ok then mp.osd_message("This mpv has no link prompt (needs mp.input)", 3); return end
+  prompt.open, prompt.submitted, prompt.text, prompt.msg = true, false, text or "", msg
+  prompt.akey = nil; draw_hint(); blink_start()
+  mp.input_enable_section(prompt.SEC, "allow-hide-cursor")
+  prompt_keys(true)
+  input.get({
+    prompt = "Link: ",
+    default_text = prompt.text,
+    edited = function(t)
+      local before = prompt.text
+      prompt.text = t
+      blink.on = true; draw_hint()
+      if #t - #before > 1 and not prompt.submitted then on_pasted(t) end
+    end,
+    submit = function(t)
+      local url = (t or ""):gsub("%s", "")
+      if not url:match(URL_PAT) then
+        prompt.reopen = t or ""
+        prompt.reopen_msg = "That isn't a web link. Copy a YouTube URL and paste it."
+        input.terminate()
+        return
+      end
+      play_link(url, false)
+    end,
+    closed = function()
+      prompt.open = false
+      mp.input_disable_section(prompt.SEC)
+      prompt_keys(false)
+      if prompt.reopen then
+        local t, m = prompt.reopen, prompt.reopen_msg
+        prompt.reopen, prompt.reopen_msg = nil, nil
+        mp.add_timeout(0.01, function() open_prompt(t, m) end)
+        return
+      end
+      blink_stop(); hint_ov:remove()
+      if not prompt.submitted and idle_empty() then mp.commandv("quit") end   -- Esc: close
+    end,
+  })
+end
+mp.observe_property("osd-dimensions", "native", function() if prompt.open then draw_hint() end end)
+if opts.prompt then   -- an empty window: always the clean home screen (never a pre-filled link)
+  mp.add_timeout(0.3, function() if idle_empty() then open_prompt("") end end)
+end
+-- YouTube Mix links (watch?v=ID&list=RD...): the auto-generated mix is endless and resolving it
+-- first costs ~14 s; play the one video (autoplay continues with the up-next mix). Real
+-- playlists (list=PL..., OLAK...) are untouched. Runs before ytdl_hook (priority 10).
+do
+  local function unmix(u)
+    if not u:match("[?&]list=RD") then return nil end
+    if not (u:match("[?&]v=[%w_%-]") or u:match("youtu%.be/[%w_%-]") or u:match("/shorts/") or u:match("/live/")) then return nil end
+    local base, q, frag = u:match("^([^?#]*)%??([^#]*)(#?.*)$")
+    if not base then return nil end
+    local keep = {}
+    for kv in q:gmatch("[^&]+") do
+      local k = kv:match("^[^=]*")
+      if k ~= "list" and k ~= "start_radio" and k ~= "index" and k ~= "pp" then keep[#keep + 1] = kv end
+    end
+    return base .. (#keep > 0 and ("?" .. table.concat(keep, "&")) or "") .. frag
+  end
+  prompt.unmix = unmix
+  mp.add_hook("on_load", 9, function()
+    local u = mp.get_property("stream-open-filename", "")
+    local n = unmix(u)
+    if n and n ~= u then mp.msg.info("mix link -> single video: " .. n); mp.set_property("stream-open-filename", n) end
+  end)
+end
+
+-- boot / launcher: the first link of a window. Clipboard start (SUPER+ALT+Y) comes up ARMED: the
+-- link resolves and preloads PAUSED inside the console screen (platform, title, length, live
+-- buffer) and one big square FIRE button waits - click it, Enter or Space; Esc aborts to the home
+-- screen. FIRE (a typed / pasted / launched link fires by itself) runs a ~2.3 s countdown: reticle
+-- closing, arming bars, 3-2-1, WEAPONS FREE, then the picture expands to the full window and plays.
+-- Not ready by then: STILL ACQUIRING with a live clock. A failed load: NO SIGNAL + RETRY. Timers
+-- live only while the console is up (10 Hz armed, 25 Hz in the countdown). Later loads (swap,
+-- playlist) get the small card.
+;(function()   -- own function scope: the main chunk is at the 200-locals limit
+  local B = { ov = mp.create_osd_overlay("ass-events"), clip = os.getenv("OMARAPTOR_CLIPSTART") == "1",
+    armed = true, on = false, card = false }
+  B.ov.z = 40
+  local MR = { "video-margin-ratio-left", "video-margin-ratio-top", "video-margin-ratio-right", "video-margin-ratio-bottom" }
+  local CD, GO, REV, CRT = 2.25, 0.3, 0.42, 0.36   -- countdown, WEAPONS FREE hold, expand, CRT switch-on
+  B.CDA = 0.9          -- countdown when the link itself was the press (typed / pasted / explicit): stays quick
+  local SEC, CORE = "omaraptor-boot-fire", "E8FFF4"
+  if B.clip then state.boot = true; mp.set_property_bool("pause", true) end   -- nothing plays before FIRE
+  local op = open_prompt
+  open_prompt = function(...) B.armed = true; return op(...) end      -- the home screen re-arms it
+  prompt.arm = function() B.clip = true end                           -- PASTE LINK: ARMED, FIRE waits
+  function B.margins(x0, y0, x1, y1, w, h)
+    local v = { x0 / w, y0 / h, (w - x1) / w, (h - y1) / h }
+    local key = string.format("%.4f %.4f %.4f %.4f", v[1], v[2], v[3], v[4])
+    if key == B.mkey then return end
+    B.mkey = key
+    for i = 1, 4 do mp.set_property_number(MR[i], math.max(0, math.min(0.49, v[i]))) end
+  end
+  function B.area(x0, y0, x1, y1)        -- the FIRE button's click rect (0-size: no mouse at all)
+    local k = x0 .. " " .. y0 .. " " .. x1 .. " " .. y1
+    if k ~= B.akey then B.akey = k; mp.set_mouse_area(x0, y0, x1, y1, SEC) end
+  end
+  function B.rate(dt)
+    if B.timer and B.dt == dt then return end
+    if B.timer then B.timer:kill() end
+    B.dt, B.timer = dt, mp.add_periodic_timer(dt, function() B.draw() end)
+  end
+  function B.pub(k)
+    if k then B.ts[k] = mp.get_time() - B.t0 end
+    mp.set_property_native("user-data/omaraptor-boot", B.ts)      -- tests / timing
+  end
+  function B.stop()
+    state.boot = nil
+    if hud.pin then mp.add_timeout(0.05, function() show() end) end   -- pinned: the frame comes up on its own
+    if B.timer then B.timer:kill(); B.timer = nil end
