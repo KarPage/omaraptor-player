@@ -1,0 +1,572 @@
+    for _, sec in pairs(TAPES) do mp.input_disable_section(sec) end
+    state.section_on = false
+  end
+  publish()
+end
+
+inside = function(r, x, y)
+  return r and x >= r.x and x < r.x + r.w and y >= r.y and y < r.y + r.h
+end
+
+local function hit(x, y)
+  for name, r in pairs(state.buttons) do
+    if name ~= "time" and inside(r.grab or r, x, y) then return name end
+  end
+end
+
+-- show / hide --------------------------------------------------------------------------------
+local function stop_fade() if fade_timer then fade_timer:kill(); fade_timer = nil end end
+
+local function fade_to(target, done)
+  stop_fade()
+  local step = (target - state.fade) / FADE_STEPS
+  if step == 0 then if done then done() end; return end
+  fade_timer = mp.add_periodic_timer(FADE_TIME / FADE_STEPS, function()
+    state.fade = state.fade + step
+    if (step > 0 and state.fade >= target) or (step < 0 and state.fade <= target) then
+      state.fade = target
+      stop_fade()
+      if done then done() end
+    end
+    render()
+  end)
+end
+
+local function hide(now)
+  hide_timer:kill()
+  state.hot = nil
+  state.visible = false
+  state.dragging = false
+  set_section(false)
+  tick_timer:kill()
+  marquee_run(false)
+  remfx.sync()
+  if now then stop_fade(); state.fade = 0; ov:remove(); if eq.rate then eq.rate(false) end; return end
+  fade_to(0, function() ov:remove(); if eq.rate then eq.rate(false) end end)
+end
+
+local function arm_hide(secs)
+  hide_timer:kill()
+  hide_timer.timeout = secs or opts.timeout
+  hide_timer:resume()
+end
+
+local function show(secs)
+  if hud.dead or state.boot then return end      -- boot sequence on screen: the HUD comes in after it
+  if not state.visible then
+    state.visible = true
+    tick_timer:resume()
+    if eq.rate then eq.rate(true) end
+    fade_to(1)
+    render()
+  else want() end
+  remfx.sync()
+  set_section(true)
+  arm_hide(secs)
+end
+
+local function keep_up()  -- paused, dragging, or the pointer resting on the bar
+  if hud.pin or mp.get_property_bool("pause") or state.dragging or state.vdrag or tips_open then return true end
+  local m = mp.get_property_native("mouse-pos")
+  return m and m.hover and inside(state.panel, m.x, m.y)
+end
+
+hide_timer = mp.add_timeout(opts.timeout, function()
+  if keep_up() then arm_hide(); return end
+  hide()
+end)
+hide_timer:kill()
+tick_timer = mp.add_periodic_timer(0.5, render)   -- keeps the clock / progress moving
+tick_timer:kill()
+function hud.apply_wpin(on)     -- Hyprland pin follows workspaces; dispatch only from the launcher
+  mp.command_native_async({ name = "subprocess", args = { OMARAPTOR, "pin", on and "on" or "off" },
+    playback_only = false, capture_stdout = true, capture_stderr = true }, function() end)
+end
+function hud.toggle_pin(v)       -- PIN: every workspace, on top, and the frame stays up
+  if v == nil then hud.pin = not hud.pin else hud.pin = v and true or false end
+  hud.apply_wpin(hud.pin)
+  if hud.pin then show() else render(); arm_hide() end
+  publish()
+  return hud.pin
+end
+function hud.night_eq()
+  local lvl, b, g, s = hud.night or 0, 0, 0, 0
+  if lvl == 1 then b, g, s = -14, 6, -10
+  elseif lvl == 2 then b, g, s = -30, -6, -20 end
+  mp.set_property_number("brightness", b)
+  mp.set_property_number("gamma", g)
+  mp.set_property_number("saturation", s)
+end
+function hud.night_draw()
+  local lvl = hud.night or 0
+  if hud.dead or lvl == 0 then if hud.veil then hud.veil:remove() end; return end
+  local w, h = mp.get_osd_size()
+  if not w or w <= 0 or not h or h <= 0 then return end
+  local col, al = "1E1408", 0xA6
+  if lvl >= 2 then col, al = "181006", 0x70 end
+  hud.veil.res_x, hud.veil.res_y = w, h
+  hud.veil.data = string.format(
+    "{\\an7\\pos(0,0)\\bord0\\shad0\\1c&H%s&\\1a&H%02X&\\p1}m 0 0 l %d 0 l %d %d l 0 %d{\\p0}",
+    col, al, w, w, h, h)
+  hud.veil:update()
+end
+function hud.night_save()
+  if os.getenv("OMR_NIGHT_NOSAVE") == "1" then return end
+  local val = ({ "off", "dim", "dimmer" })[(hud.night or 0) + 1] or "off"
+  local base = os.getenv("XDG_CONFIG_HOME")
+  if not base or base == "" then base = (os.getenv("HOME") or "") .. "/.config" end
+  local path = base .. "/omaraptor/script-opts/omaraptor-hud.conf"
+  local f = io.open(path, "r")
+  local body = f and f:read("*a") or ""
+  if f then f:close() end
+  if body:find("night=") then body = body:gsub("night=[^%s\r\n]*", "night=" .. val, 1)
+  else
+    if body ~= "" and not body:match("\n$") then body = body .. "\n" end
+    body = body .. "night=" .. val .. "\n"
+  end
+  local dir = path:match("^(.*)/")
+  if dir then os.execute(string.format("mkdir -p %q", dir)) end
+  local w = io.open(path, "w")
+  if w then w:write(body); w:close() end
+end
+function hud.night_set(lvl, save)
+  lvl = math.floor(tonumber(lvl) or 0)
+  if lvl < 0 then lvl = 0 elseif lvl > 2 then lvl = 2 end
+  hud.night = lvl
+  hud.night_eq()
+  hud.night_draw()
+  if save ~= false then hud.night_save() end
+  if state.visible then render() end
+  publish()
+end
+function hud.night_cycle()
+  hud.night_set(((hud.night or 0) + 1) % 3, true)
+  show()
+end
+function hud.standby()           -- installer reload: drop this copy so load-script can draw one HUD
+  hud.dead = true
+  if hide_timer then pcall(function() hide_timer:kill() end) end
+  if fade_timer then pcall(function() fade_timer:kill() end) end
+  if tick_timer then pcall(function() tick_timer:kill() end) end
+  pcall(function() ov:remove() end)
+  pcall(function() if hud.veil then hud.veil:remove() end end)
+  pcall(set_section, false)
+  pcall(function() mp.input_disable_section(TIPS_SECTION) end)
+  pcall(function() mp.input_disable_section(hud.NIGHT_SECTION) end)
+  local names = { "pin", "night", "tips", "click", "nop", "spd-up", "spd-down", "tips-click",
+    "tips-close", "tips-keyhints", "video-click", "video-dbl", "arm-click", "arm-cancel",
+    "arm-enter", "hud-mode", "hud-mode-h", "home-paste", "boot-fire", "boot-abort",
+    "card-close", "card-esc", "card-click" }
+  for _, n in ipairs(names) do pcall(function() mp.remove_key_binding(n) end) end
+end
+
+-- window size (runs "omaraptor size ...", throttled so a fast wheel doesn't pile up) -----------
+local resize_busy, resize_next = false, nil
+local function resize(dir)
+  if resize_busy then resize_next = dir; return end
+  resize_busy = true
+  mp.command_native_async({ name = "subprocess", args = { OMARAPTOR, "size", dir },
+    playback_only = false, capture_stdout = true, capture_stderr = true }, function()
+    resize_busy = false
+    local n = resize_next; resize_next = nil
+    if n then resize(n) end
+  end)
+end
+
+-- seeking from the progress bar ----------------------------------------------------------------
+local function seek_at(x, exact)
+  local dur = mp.get_property_number("duration")
+  if not state.buttons.seek or not dur or dur <= 0 then return end
+  mp.commandv("seek", tostring(seek_frac(x) * 100), exact and "absolute-percent+exact" or "absolute-percent+keyframes")
+  state.last_seek = mp.get_time()
+end
+
+
+-- keyboard panel ("?"): the whole key map in three columns (PLAYBACK / SOUND · VIEW / COCKPIT).
+-- Static table: nothing is read from disk when it opens. Esc, ? or a click outside closes it.
+local tips = { box = nil, tog = nil }
+-- KEY HINTS: the key-letter badges over the buttons on hover. OFF by default; toggled in the "?"
+-- panel (click or T) and kept across launches as one tiny file (read once here, written on toggle).
+do
+  local base = os.getenv("XDG_STATE_HOME")
+  if not base or base == "" then base = (os.getenv("HOME") or "") .. "/.local/state" end
+  tips.KH_DIR = base .. "/omaraptor"
+  tips.KH_FILE = tips.KH_DIR .. "/key-hints"
+  local f = io.open(tips.KH_FILE, "r")
+  hud.keyhints = f and (f:read("*l") == "on") or false
+  if f then f:close() end
+end
+local ov_tips = mp.create_osd_overlay("ass-events")
+ov_tips.z = 30
+local function ulen(str) return select(2, str:gsub("[^\128-\191]", "")) end
+local KEY_COLS = {
+  { "PLAYBACK", {
+    { "SPACE / K", "play · pause" }, { "← / →", "back / fwd 5 s" }, { "J / L", "back / fwd 10 s" },
+    { "0 – 9", "jump to 0–90 %" }, { "< / >", "speed − / +" }, { "]  ·  ⇧N", "next · previous" },
+    { "R", "repeat on / off" } } },
+  { "SOUND · VIEW", {
+    { "↑ / ↓", "volume ± 5" }, { "M", "mute" }, { "F", "fullscreen" }, { "ESC", "close panel · exit fs" },
+    { "-  =  S", "smaller · larger · cycle" }, { "C", "subtitles" }, { "I", "link / signal info" },
+    { "N", "night off · dim · dimmer" } } },
+  { "COCKPIT", {
+    { "H", "arm panel (CRUISE ↔ COMBAT)" }, { "ENTER", "throw switch (in panel)" },
+    { "O", "new window · paste link" }, { "P", "pin on every workspace" }, { "?", "this panel" }, { "Q", "quit" },
+    { "T", "key hints on / off (here)" } } },
+}
+local KEY_FOOT = "click  play · pause   ·   double-click  fullscreen   ·   drag  move   ·   wheel  volume"
+
+local function render_tips()
+  if not tips_open then ov_tips:remove(); return end
+  local w, h = mp.get_osd_size()
+  if not w or w <= 0 or h <= 0 then return end
+  local kch, dch, rows = 0, 0, 0
+  for _, c in ipairs(KEY_COLS) do
+    rows = math.max(rows, #c[2])
+    for _, r in ipairs(c[2]) do kch = math.max(kch, ulen(r[1])); dch = math.max(dch, ulen(r[2])) end
+  end
+  local margin = math.max(16, math.floor(math.min(w, h) * 0.06))
+  local bp = state.visible and state.panel
+  local top = bp and bp.by and math.floor(bp.by - bp.fs * 0.9 * 1.45 - 10) or h   -- button row + its key caps stay uncovered
+  if top < h * 0.55 then top = h end                 -- too little room above the bar: use the full height (as before)
+  local aw, ah = w - 2 * margin, top - margin - math.min(margin, 8)
+  -- layout in units of fs: pick 3, 2 or 1 columns, whichever gives the largest type that fits
+  local best
+  for _, nc in ipairs({ 3, 2, 1 }) do
+    local per = nc == 3 and { { 1 }, { 2 }, { 3 } } or nc == 2 and { { 1 }, { 2, 3 } } or { { 1, 2, 3 } }
+    local hu = 0
+    for _, g in ipairs(per) do
+      local u = 0
+      for _, ci in ipairs(g) do u = u + 2.6 + #KEY_COLS[ci][2] * 1.95 end
+      hu = math.max(hu, u)
+    end
+    local cwu = (kch + 2) * 0.62 + 2.2 + dch * 0.62 + 1.2   -- keycap + gap + description
+    local wu = nc * cwu + (nc - 1) * 2.2 + 3.2
+    local hu_all = 3.6 + hu + 2.6
+    local fs = math.floor(math.min(aw / wu, ah / hu_all, h * 0.03 + 4))
+    if not best or fs > best.fs then best = { fs = fs, nc = nc, per = per, cwu = cwu } end
+    if nc == 3 and fs >= 13 then break end
+  end
+  local fs, nc, per = math.max(8, best.fs), best.nc, best.per
+  local cw, gap = math.floor(best.cwu * fs), math.floor(2.2 * fs)
+  local head_h, foot_h = math.floor(3.6 * fs), math.floor(2.6 * fs)
+  local body_u = 0
+  for _, g in ipairs(per) do local u = 0; for _, ci in ipairs(g) do u = u + 2.6 + #KEY_COLS[ci][2] * 1.95 end; body_u = math.max(body_u, u) end
+  local pw = math.min(w - 8, math.max(math.floor(aw * 0.84), nc * cw + (nc - 1) * gap + math.floor(3.2 * fs)))
+  local ph = math.min(top - 8, head_h + math.floor(body_u * fs) + foot_h)
+  local px, py = math.floor((w - pw) / 2), math.max(4, math.floor((top - ph) / 2))
+  tips.box = { x = px, y = py, w = pw, h = ph }
+  local inner = math.floor(1.6 * fs)
+  local colw = math.floor((pw - 2 * inner - (nc - 1) * gap) / nc)
+  local bt = math.max(1, math.floor(fs * 0.1 + 0.5))
+  local out = {}
+  local function ev(body) out[#out + 1] = "{\\an7\\pos(0,0)\\bord0\\shad0" .. body end
+  local function rect(x0, y0, x1, y1) return string.format("m %d %d l %d %d l %d %d l %d %d ", x0, y0, x1, y0, x1, y1, x0, y1) end
+  local function frame(x, y, fw, fh, t)
+    return rect(x, y, x + fw, y + t) .. rect(x, y + fh - t, x + fw, y + fh) ..
+      rect(x, y + t, x + t, y + fh - t) .. rect(x + fw - t, y + t, x + fw, y + fh - t)
+  end
+  local function txt(x, y, an, f, col, al, body, extra)
+    out[#out + 1] = string.format("{\\an%d\\pos(%d,%d)\\fn%s\\fs%d\\bord0\\shad0\\q2\\fsp0\\1c&H%s&\\1a&H%02X&%s}%s",
+      an, x, y, MONO, f, col, al, extra or "", body)
+  end
+  ev(string.format("\\1c&H000000&\\1a&H80&\\p1}%s{\\p0}", rect(0, 0, w, top)))               -- dim backdrop (not over the button row)
+  ev(string.format("\\1c&H%s&\\1a&H1C&\\p1}%s{\\p0}", INK, rect(px, py, px + pw, py + ph)))
+  ev(string.format("\\1c&H%s&\\1a&H30&\\p1}%s{\\p0}", ACCENT, frame(px, py, pw, ph, bt)))
+  txt(px + inner, py + math.floor(head_h * 0.5), 4, math.floor(fs * 1.15), ACCENT, 0, "KEYBOARD", "\\b1\\fsp1")
+  local hy, cf = py + math.floor(head_h * 0.5), math.floor(fs * 0.8)
+  txt(px + pw - inner, hy, 6, cf, AMBER, 0, "?  /  ESC  CLOSE", "\\fsp1")
+  do   -- KEY HINTS [ON | OFF] switch, left of CLOSE: two square cells, the live one filled jade
+    local ON = hud.keyhints
+    local cx1 = px + pw - inner - math.floor(ulen("?  /  ESC  CLOSE") * 0.66 * cf) - math.floor(fs * 1.6)
+    local sw, sh = math.floor(fs * 2.6), math.floor(fs * 1.4)
+    local lbl = "KEY HINTS"
+    local tw = math.floor(fs * 1.4) + math.floor(fs * 0.5) + math.floor(ulen(lbl) * 0.66 * cf) + math.floor(fs * 0.7) + 2 * sw
+    if cx1 - tw < px + inner + math.floor(8 * 0.7 * fs * 1.15) + fs then lbl = "HINTS"
+      tw = tw - math.floor(4 * 0.66 * cf) end
+    local sx0, sy0 = cx1 - 2 * sw, hy - math.floor(sh / 2)
+    local cells = { { "ON", sx0, ON }, { "OFF", sx0 + sw, not ON } }
+    for _, c in ipairs(cells) do
+      if c[3] then ev(string.format("\\1c&H%s&\\1a&H00&\\p1}%s{\\p0}", ACCENT, rect(c[2], sy0, c[2] + sw, sy0 + sh))) end
+      ev(string.format("\\1c&H%s&\\1a&H%02X&\\p1}%s{\\p0}", ACCENT, c[3] and 0x00 or 0x40, frame(c[2], sy0, sw, sh, bt)))
+      txt(c[2] + math.floor(sw / 2), hy, 5, cf, c[3] and INK or ACCENT, c[3] and 0 or 0x50, c[1], "\\b1\\fsp1")
+    end
+    local lx = sx0 - math.floor(fs * 0.7)
+    txt(lx, hy, 6, cf, ACCENT, 0, lbl, "\\fsp1")
+    local kw = math.floor(fs * 1.4)
+    local kx = lx - math.floor(ulen(lbl) * 0.66 * cf) - math.floor(fs * 0.5) - kw
+    local fl = tips.flash and mp.get_time() - tips.flash < 0.25   -- just pressed: jade cap, ink letter
+    if fl then ev(string.format("\\1c&H%s&\\1a&H00&\\p1}%s{\\p0}", ACCENT, rect(kx, sy0, kx + kw, sy0 + sh))) end
+    ev(string.format("\\1c&H%s&\\1a&H10&\\p1}%s{\\p0}", ACCENT, frame(kx, sy0, kw, sh, bt)))
+    txt(kx + math.floor(kw / 2), hy, 5, cf, fl and INK or ACCENT, 0, "T", "\\b1")
+    tips.tog = { x = kx - 4, y = sy0 - 4, w = cx1 - kx + 8, h = sh + 8 }   -- whole switch (key cap .. OFF) is the hit area
+  end
+  local caps, lines = {}, {}
+  for gi, g in ipairs(per) do
+    local x0 = px + inner + (gi - 1) * (colw + gap)
+    local y = py + head_h
+    for _, ci in ipairs(g) do
+      local c = KEY_COLS[ci]
+      txt(x0, y + math.floor(fs * 0.8), 4, math.floor(fs * 0.85), AMBER, 0, c[1], "\\b1\\fsp1")
+      lines[#lines + 1] = rect(x0, y + math.floor(fs * 1.7), x0 + colw, y + math.floor(fs * 1.7) + 1)
+      y = y + math.floor(2.6 * fs)
+      local kx = x0
+      local dx = x0 + math.floor((kch + 2) * 0.62 * fs + 2.2 * fs)
+      for _, r in ipairs(c[2]) do
+        local ch = math.floor(fs * 1.5)
+        local kw = math.floor(ulen(r[1]) * 0.62 * fs + fs * 1.0)
+        local cy = y + math.floor(fs * 0.75)
+        caps[#caps + 1] = frame(kx, cy - math.floor(ch / 2), kw, ch, bt)
+        txt(kx + math.floor(kw / 2), cy, 5, fs, ACCENT, 0, r[1], "\\b1")
+        txt(dx, cy, 4, fs, "E6E6E6", 0x10, r[2])
+        y = y + math.floor(1.95 * fs)
+      end
+    end
+  end
+  ev(string.format("\\1c&H%s&\\1a&H90&\\p1}%s{\\p0}", ACCENT, table.concat(lines)))
+  ev(string.format("\\1c&H%s&\\1a&H10&\\p1}%s{\\p0}", ACCENT, table.concat(caps)))
+  txt(px + inner, py + ph - math.floor(foot_h * 0.55), 4, math.floor(fs * 0.75), "AAAAAA", 0x30, KEY_FOOT, "\\fsp1")
+  ov_tips.res_x, ov_tips.res_y, ov_tips.data = w, h, table.concat(out, "\n")
+  ov_tips:update()
+  mp.set_property_native("user-data/omaraptor-hud-tips", { open = true, cols = nc, fs = fs, box = tips.box, tog = tips.tog, keyhints = hud.keyhints })
+end
+
+local function close_tips()
+  if not tips_open then return end
+  tips_open = false
+  mp.input_disable_section(TIPS_SECTION)
+  ov_tips:remove()
+  mp.set_property_native("user-data/omaraptor-hud-tips", { open = false })
+  arm_hide()
+end
+local function open_tips()
+  if hud.card_off then hud.card_off() end
+  tips_open = true
+  local w, h = mp.get_osd_size()
+  mp.set_mouse_area(0, 0, w or 10000, h or 10000, TIPS_SECTION)
+  mp.input_disable_section(TIPS_SECTION)
+  mp.input_enable_section(TIPS_SECTION)   -- on top of the bar, the "?" button and the video click
+  show()                                  -- bar first: the panel is laid out above its button row
+  render_tips()
+end
+local function toggle_tips() if tips_open then close_tips() else open_tips() end end
+function tips.keyhints_toggle()   -- KEY HINTS on / off: persists as <state>/omaraptor/key-hints ("on"; absent = off)
+  hud.keyhints = not hud.keyhints
+  tips.flash = mp.get_time()
+  if tips_open then render_tips() end            -- feedback first: segment + jade T cap
+  show()                                         -- bar up (or kept up); draws it now with the hints on / off
+  if tips.flash_t then tips.flash_t:kill() end
+  tips.flash_t = mp.add_timeout(0.26, function() tips.flash_t = nil; if tips_open then render_tips() end end)
+  local f = io.open(tips.KH_FILE, "w")
+  if not f then                                  -- first write only: create the state dir
+    mp.command_native({ name = "subprocess", args = { "mkdir", "-p", tips.KH_DIR }, playback_only = false,
+      capture_stdout = true, capture_stderr = true })
+    f = io.open(tips.KH_FILE, "w")
+  end
+  if f then f:write(hud.keyhints and "on\n" or "off\n"); f:close() end
+  mp.set_property_native("user-data/omaraptor-hud-keyhints", hud.keyhints)
+end
+local function tips_click(e)
+  if e.event ~= "down" and e.event ~= "press" then return end
+  local m, b = mp.get_property_native("mouse-pos"), tips.box
+  if m and tips.tog and inside(tips.tog, m.x, m.y) then tips.keyhints_toggle(); return end
+  if not (m and b and inside(b, m.x, m.y)) then close_tips() end   -- inside: nothing (no pause)
+end
+
+-- actions ------------------------------------------------------------------------------------
+local actions = {
+  back = function() mp.commandv("seek", "-10"); return "-10s" end,
+  fwd  = function() mp.commandv("seek", "10"); return "+10s" end,
+  play = function()
+    mp.commandv("cycle", "pause")
+    return mp.get_property_bool("pause") and "PAUSED" or "PLAYING"
+  end,
+  vol = function()
+    mp.commandv("cycle", "mute")
+    return mp.get_property_bool("mute") and "Muted" or "Sound on"
+  end,
+  spd = function(m)                 -- cell = that speed directly; header row = old cycle
+    local cur, nxt = mp.get_property_number("speed") or 1, 1
+    local i = m and spd_cell_at(state.buttons.spd, m.x, m.y)
+    if i then
+      if math.abs(SPD_STEPS[i] - cur) < 0.001 then if info_pop then info_pop("spd") end
+      else mp.set_property_number("speed", SPD_STEPS[i]) end   -- popup via the speed observer
+      return nil
+    end
+    -- header: 1.00 > 1.25 > 1.50 > 2.00 > 0.75 > 1.00
+    for i, v in ipairs(SPEEDS) do if math.abs(v - cur) < 0.01 then nxt = SPEEDS[i % #SPEEDS + 1] end end
+    mp.set_property_number("speed", nxt)
+    return nil                      -- confirmation = centre popup (speed observer)
+  end,
+  loop = function(m)                -- OFF / ON halves set it directly; header row toggles
+    local r = state.buttons.loop; local h = r and r.halves
+    if m and h and m.y >= h.y0 then
+      local on = m.x >= h.x0 + h.hw + 2
+      if on == ((mp.get_property("loop-file") or "no") ~= "no") then if info_pop then info_pop("loop") end
+      else mp.set_property("loop-file", on and "inf" or "no") end
+      return nil
+    end
+    mp.commandv("cycle-values", "loop-file", "inf", "no")
+    return nil                      -- confirmation = centre popup (loop-file observer)
+  end,
+  link = function() if info_pop then info_pop("link") end; return nil end,
+  smaller = function() resize("smaller"); return nil end,
+  larger  = function() resize("larger"); return nil end,
+  help    = function() toggle_tips(); return nil end,
+  hud     = function() if arm_toggle then arm_toggle() end; return nil end,
+  pin     = function() hud.toggle_pin(); return nil end,
+  night   = function() hud.night_cycle(); return nil end,
+  fs      = function() mp.commandv("cycle", "fullscreen"); return nil end,
+  new     = function()   -- another, EMPTY omaraptor window, opened over this one (our pid)
+    mp.command_native_async({ name = "subprocess", args = { OMARAPTOR, "new", tostring(mp.get_property_number("pid", 0)) }, playback_only = false,
+      detach = true, capture_stdout = false, capture_stderr = false }, function() end)
+    return "New window"
+  end,
+}
+
+local function spd_step(d)                -- wheel on the SPEED box: one cell up / down, clamped
+  local cur = mp.get_property_number("speed") or 1
+  local i = math.floor((math.max(0.5, math.min(2, cur)) - 0.5) / 0.25 + 0.5) + 1
+  local j = math.max(1, math.min(#SPD_STEPS, i + d))
+  if j ~= i or math.abs(SPD_STEPS[j] - cur) > 0.001 then mp.set_property_number("speed", SPD_STEPS[j])
+  elseif info_pop then info_pop("spd") end
+  show()
+end
+local function vol_at(x)
+  local r = state.buttons.vgauge; if not r then return end
+  local v = math.max(0, math.min(100, math.floor((x - r.x) / r.w * 20 + 0.5) * 5))
+  mp.set_property_number("volume", v)
+  if v > 0 and mp.get_property_bool("mute") then mp.set_property_bool("mute", false) end
+end
+-- drag targets: VOL gauge / VOL tape set volume, TIME tape seeks, heading tape fine-seeks
+local function drag_apply(name, m, final)
+  local r = state.buttons[name]; if not r or not m then return end
+  if name == "vgauge" then vol_at(m.x)
+  elseif name == "vtape" then
+    if final and state.grab_box and not state.drag_moved then return end      -- click on the box: no change
+    local v = math.floor(clamp01((r.y + r.h - (m.y - state.grab_dy)) / r.h) * 100 + 0.5)
+    mp.set_property_number("volume", v)
+    if v > 0 and mp.get_property_bool("mute") then mp.set_property_bool("mute", false) end
+  elseif name == "ttape" then                         -- countdown tape: y = remaining time
+    if is_live() then return end                      -- LIVE tape: click jumps to the edge (click())
+    if final and state.grab_box and not state.drag_moved then return end
+    local dur = mp.get_property_number("duration")
+    if not dur or dur <= 0 then return end
+    local tgt = dur - clamp01((r.y + r.h - (m.y - state.grab_dy)) / r.h) * dur
+    state.seek_tgt = tgt
+    if final or mp.get_time() - state.last_seek > 0.06 then
+      mp.commandv("seek", tostring(tgt), final and "absolute+exact" or "absolute+keyframes")
+      state.last_seek = mp.get_time()
+    end
+    if info_pop then info_pop("seek") end
+  elseif name == "htape" and final then
+    local pos, pxs = mp.get_property_number("time-pos"), r.pxs
+    if pos and pxs then
+      mp.commandv("seek", tostring(math.max(0, pos + (m.x - (r.x + r.w / 2)) / pxs)), "absolute+exact")
+    end
+  end
+end
+local function click(e)
+  local m = mp.get_property_native("mouse-pos")
+  if e.event == "up" then
+    if state.vdrag then
+      local was = state.vdrag
+      drag_apply(was, m, true); state.vdrag = false
+      if info_pop and (was == "ttape" or was == "vtape") then info_pop(was == "ttape" and "seek" or "vol") end   -- unpin: hold + fade
+      state.grab_dy, state.grab_box, state.seek_tgt = 0, false, nil
+      show(); return
+    end
+    if state.dragging then
+      state.dragging = false
+      if m then seek_at(m.x, true) end
+      show()
+    end
+    return
+  end
+  if e.event == "repeat" then return end
+  local name = m and hit(m.x, m.y)
+  if not name then return end                     -- bar padding: swallow, do nothing
+  if name == "ttape" and is_live() then              -- LIVE tape: click = back to the live edge
+    if e.event == "down" or e.event == "press" then
+      local d = mp.get_property_number("duration")
+      if d and d > 0 then mp.commandv("seek", tostring(math.max(0, d - 1)), "absolute") end
+      if mp.get_property_bool("pause") then mp.set_property_bool("pause", false) end
+      set_status("LIVE EDGE"); show()
+    end
+    return
+  end
+  if name == "vgauge" or name == "vtape" or name == "ttape" or name == "htape" then
+    state.vdrag = e.event == "down" and name or false
+    state.grab_dy, state.grab_box, state.drag_moved = 0, false, false
+    if (name == "vtape" or name == "ttape") and e.event == "down" then
+      local r = state.buttons[name]
+      local by = name == "vtape" and (r.y + r.h - clamp01((mp.get_property_number("volume") or 0) / 100) * r.h)
+      if name == "ttape" then
+        local dur, pos = mp.get_property_number("duration") or 0, mp.get_property_number("time-pos") or 0
+        by = r.y + r.h - (dur > 0 and clamp01((dur - pos) / dur) or 0) * r.h
+        state.seek_from, state.seek_tgt = pos, pos
+      end
+      local bh = math.floor((state.panel and state.panel.fs or 20) * 1.6)
+      if math.abs(m.y - by) <= bh * 0.75 then          -- grabbed the pointer box: keep the offset, no jump
+        state.grab_dy, state.grab_box = m.y - by, true
+      end
+      if info_pop then info_pop(name == "ttape" and "seek" or "vol") end   -- pinned while held
+      if state.grab_box then show(); return end
+    end
+    drag_apply(name, m, e.event ~= "down")
+  elseif name == "seek" or name == "phead" then         -- the playhead index is the grab target
+    state.dragging = e.event == "down"            -- "press" (no up coming): a single seek
+    seek_at(m.x, not state.dragging)
+  else
+    local msg = actions[name](m)
+    press_flash(name)
+    if msg then set_status(msg:upper()) end
+  end
+  show()
+end
+
+-- Named bindings (no key): the bar's own input section routes the mouse to them.
+mp.add_key_binding(nil, "click", click, { complex = true })
+mp.add_key_binding(nil, "nop", function() end)
+local me = mp.get_script_name()
+mp.input_define_section(SECTION,
+  "MBTN_LEFT script-binding " .. me .. "/click\n" ..
+  "MBTN_LEFT_DBL script-binding " .. me .. "/nop\n" ..   -- no fullscreen from a double-tap on the bar
+  "MBTN_RIGHT script-binding " .. me .. "/nop\n", "force")
+mp.input_define_section(NEW_SECTION,
+  "MBTN_LEFT script-binding " .. me .. "/click\n" ..
+  "MBTN_LEFT_DBL script-binding " .. me .. "/nop\n" ..
+  "MBTN_RIGHT script-binding " .. me .. "/nop\n", "force")
+for _, sec in pairs(TAPES) do
+  mp.input_define_section(sec,
+    "MBTN_LEFT script-binding " .. me .. "/click\n" ..
+    "MBTN_LEFT_DBL script-binding " .. me .. "/nop\n" ..
+    "MBTN_RIGHT script-binding " .. me .. "/nop\n", "force")
+end
+mp.add_key_binding(nil, "spd-up", function() spd_step(1) end)
+mp.add_key_binding(nil, "spd-down", function() spd_step(-1) end)
+mp.input_define_section(TAPES.spd,
+  "MBTN_LEFT script-binding " .. me .. "/click\n" ..
+  "MBTN_LEFT_DBL script-binding " .. me .. "/nop\n" ..
+  "MBTN_RIGHT script-binding " .. me .. "/nop\n" ..
+  "WHEEL_UP script-binding " .. me .. "/spd-up\n" ..
+  "WHEEL_DOWN script-binding " .. me .. "/spd-down\n", "force")
+mp.input_define_section(HELP_SECTION,
+  "MBTN_LEFT script-binding " .. me .. "/click\n" ..
+  "MBTN_LEFT_DBL script-binding " .. me .. "/nop\n" ..
+  "MBTN_RIGHT script-binding " .. me .. "/nop\n", "force")
+mp.input_define_section(hud.NIGHT_SECTION,
+  "MBTN_LEFT script-binding " .. me .. "/click\n" ..
+  "MBTN_LEFT_DBL script-binding " .. me .. "/nop\n" ..
+  "MBTN_RIGHT script-binding " .. me .. "/nop\n", "force")
+mp.add_key_binding(nil, "tips-click", tips_click, { complex = true })
+mp.add_key_binding(nil, "tips-close", close_tips)
+mp.add_key_binding(nil, "tips-keyhints", function() tips.keyhints_toggle() end)
+mp.set_property_native("user-data/omaraptor-hud-keyhints", hud.keyhints)
+mp.input_define_section(TIPS_SECTION,
+  "MBTN_LEFT script-binding " .. me .. "/tips-click\n" ..
+  "MBTN_LEFT_DBL script-binding " .. me .. "/nop\n" ..
+  "MBTN_RIGHT script-binding " .. me .. "/nop\n" ..
+  "ESC script-binding " .. me .. "/tips-close\n" ..
+  "? script-binding " .. me .. "/tips-close\n" ..
+  "t script-binding " .. me .. "/tips-keyhints\n" ..
+  "T script-binding " .. me .. "/tips-keyhints\n" ..
