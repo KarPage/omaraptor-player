@@ -1,0 +1,185 @@
++      if r and r.y < seek_bot then
++        local nh = h - 4 - seek_bot
++        if nh < 16 then nh = 16 end
++        if r.h > nh then r.h, r.w = nh, nh end
++        r.y = seek_bot
++        if r.y + r.h > h - 2 then r.y = h - 2 - r.h end
++      end
++    end
++  end
+   p.x, p.y = cx0 - pad, top
+   p.w, p.h = (cx1 + pad) - p.x, (by + P + pad) - top
+   p.cx0, p.cx1, p.sy, p.by = cx0, cx1, sy, by
+@@ -578,16 +629,17 @@ local function g_play(ass, r, col, al, paused)
+     end
+   end)
+ end
+-local function g_line(ass, r, col, al, plus, k)  -- thin minus / plus
+-  local cx, cy, l = math.floor(r.x + r.w / 2), math.floor(r.y + r.h / 2), math.floor(r.h * 0.2)
++local function g_line(ass, r, col, al, plus, k)  -- sharp minus / plus
++  local cx, cy, l = math.floor(r.x + r.w / 2), math.floor(r.y + r.h / 2), math.floor(math.min(r.w, r.h) * 0.30)
++  local kk = math.max(2, k)
+   shape(ass, col, al, function(d)
+-    local o = math.floor(k / 2)
+-    d:rect_cw(cx - l, cy - o, cx + l + (k % 2), cy - o + k)
+-    if plus then d:rect_cw(cx - o, cy - l, cx - o + k, cy + l + (k % 2)) end
++    local o = math.floor(kk / 2)
++    d:rect_cw(cx - l, cy - o, cx + l + (kk % 2), cy - o + kk)
++    if plus then d:rect_cw(cx - o, cy - l, cx - o + kk, cy + l + (kk % 2)) end
+   end)
+ end
+ local function g_fs(ass, r, col, al, full, t)
+-  local s = math.floor(r.h * 0.40)
++  local s = math.floor(math.min(r.w, r.h) * 0.50)
+   local x, y = math.floor(r.x + (r.w - s) / 2), math.floor(r.y + (r.h - s) / 2)
+   local l, x1, y1 = math.floor(s * 0.36), x + s, y + s
+   shape(ass, col, al, function(d)
+@@ -757,7 +809,7 @@ local function draw_seek(ass, p, r)
+   elseif style == "f22" and dur and dur > 0 then   -- rangefinder / chronograph scale
+     local y0 = math.floor(cy)
+     local px = math.floor(r.x + r.w * f)
+-    local lf = math.max(9, math.floor(p.fs * 0.74))
++    local lf = math.max(13, math.floor(p.fs * 0.74))
+     local long = dur >= 3600
+     local function lbl(t)
+       t = math.floor(t + 0.5)
+@@ -1524,7 +1576,7 @@ local function draw_fpm(ass, w, h, u, FS)        -- targeting scope: play / paus
+   end
+   local function SA(x) return math.floor(255 - (255 - x) * (255 - al) / 255) end   -- shadow: fades with the scope
+   local cx, cy = math.floor(w / 2), math.floor(h / 2)
+-  local S = math.floor(h * (FS and 0.19 or 0.21))   -- FS: 83 % of the old 0.23
++  local S = math.floor(h * (FS and 0.19 or 0.21))   -- FS: 83 % of the old 0.23 (Nik: a bit smaller, still bold)
+   local T = math.max(3, math.floor(S * 0.022))
+   local k = math.min(1, e / 0.2); k = 1 - (1 - k) ^ 3            -- 200 ms snap-in (ease-out)
+   local R = math.floor(S / 2 * (1 + 0.7 * (1 - k)))
+@@ -1658,7 +1710,7 @@ local function draw_meter(ass, p, er, muted)
+   local function cx(i) return x0 + (i - 1) * (cw + gp) end
+   local RED = er.big and math.max(2, math.floor(N * 0.1 + 0.5)) or 2   -- top ~4 dB red
+   if er.big then
+-    local lf2 = math.max(8, math.floor(p.fs * 0.62))
++    local lf2 = math.max(er.big and 13 or 8, math.floor(p.fs * 0.62))
+     local nm = { "L", "R", "\u03a3" }
+     for k = 1, 3 do
+       mtext(ass, er.lx + math.floor(lf2 * 0.2), er.y + (k - 1) * (ch + rg) + ch / 2, lf2, muted and RUST or "FFFFFF",
+@@ -1857,26 +1909,44 @@ local function draw_f22(ass, p, b, w, h, pos, dur, st)
+   mtext(ass, math.floor((p.cx0 + p.cx1) / 2), ry, math.floor(fs * 0.9), st == "PAUSED" and AMBER or ACCENT, 0x00,
+     st_icon(math.floor(fs * 0.9), st == "PAUSED") .. (st or "PLAYING"), 5, "\\fsp3")
+   -- labels under the side softkeys
+-  local function lab(x, txt) mtext(ass, x, p.laby, math.floor(fs * 0.68), "FFFFFF", 0x58, txt, 8, "\\fsp2") end
++  local function lab(x, txt)
++    local f = math.floor(fs * 0.78)
++    if f < 13 then return end
++    mtext(ass, x, p.laby, f, "FFFFFF", 0x40, txt, 8, "\\fsp1")
++  end
+   local vol, muted = mp.get_property_number("volume") or 0, mp.get_property_bool("mute")
+   if b.vol and not p.hero then
+-    if muted then mtext(ass, b.vol.x + b.vol.w / 2, p.laby, math.floor(fs * 0.68), RUST, 0x00, "MUTE", 8, "\\fsp2")
++    local f = math.floor(fs * 0.78)
++    if f >= 13 and muted then mtext(ass, b.vol.x + b.vol.w / 2, p.laby, f, RUST, 0x00, "MUTE", 8, "\\fsp1")
+     else lab(b.vol.x + b.vol.w / 2, "MUTE") end
+   end
+-  if p.rgrp then                                 -- SIZE / FS group plate (keys drawn on top later)
+-    local gr = p.rgrp
+-    ibox(ass, gr, false, ACCENT)
+-    local cy2 = gr.y + gr.h - gr.ip - math.floor(gr.cap * 0.45)
+-    mtext(ass, b.smaller.x + b.smaller.w + math.floor((b.larger.x - b.smaller.x - b.smaller.w) / 2), cy2,
+-      math.floor(fs * 0.62), "FFFFFF", 0x58, "SIZE", 5, "\\fsp2")
+-    mtext(ass, b.fs.x + b.fs.w / 2, cy2, math.floor(fs * 0.62), "FFFFFF", 0x58, "FS", 5, "\\fsp2")
+-    if b.hud then mtext(ass, b.hud.x + b.hud.w / 2, cy2, math.floor(fs * 0.62), "FFFFFF", 0x58, "HUD", 5, "\\fsp2") end
+-    if b.pin then mtext(ass, b.pin.x + b.pin.w / 2, cy2, math.floor(fs * 0.62), "FFFFFF", 0x58, "PIN", 5, "\\fsp2") end
++  if p.rgrp then                                 -- plate behind the key row (words live on the keys)
++    ibox(ass, p.rgrp, false, ACCENT)
++    local capfs = math.floor(fs * 0.78)
++    if capfs < 13 then capfs = 0 end
++    -- only when a key is too short for its own 13px word
++    if capfs > 0 and b.pin and b.pin.h < 28 and (b.pin.y + b.pin.h + capfs) < (p.rgrp.y + p.rgrp.h - 1) then
++      local cy2 = p.rgrp.y + p.rgrp.h - math.max(4, p.rgrp.ip)
++      local function cap(x, txt) mtext(ass, x, cy2, capfs, "FFFFFF", 0x40, txt, 5, "\\fsp1") end
++      if b.smaller and b.larger then
++        cap(b.smaller.x + b.smaller.w + math.floor((b.larger.x - b.smaller.x - b.smaller.w) / 2), "SIZE")
++      end
++      if b.fs then cap(b.fs.x + b.fs.w / 2, "FS") end
++      if b.hud then cap(b.hud.x + b.hud.w / 2, "HUD") end
++      if b.pin then cap(b.pin.x + b.pin.w / 2, "PIN") end
++    end
+   else
+-    if b.hud then lab(b.hud.x + b.hud.w / 2, "HUD") end
+-    if b.pin then lab(b.pin.x + b.pin.w / 2, "PIN") end
+-    if b.smaller then lab(b.smaller.x + b.smaller.w, "SIZE") end
+-    if b.fs then lab(b.fs.x + b.fs.w / 2, "FS") end
++    local function under(r, x, txt)
++      local f = math.floor(fs * 0.78)
++      if not (r and r.h < 28 and f >= 13) then return end
++      local y = r.y + r.h + math.floor(f * 0.55)
++      if y + f > h - 1 then return end
++      mtext(ass, x, y, f, "FFFFFF", 0x40, txt, 8, "\\fsp1")
++    end
++    under(b.hud, b.hud and b.hud.x + b.hud.w / 2, "HUD")
++    under(b.pin, b.pin and b.pin.x + b.pin.w / 2, "PIN")
++    under(b.smaller, b.smaller and b.smaller.x + b.smaller.w, "SIZE")
++    under(b.fs, b.fs and b.fs.x + b.fs.w / 2, "FS")
+   end
+   -- VOL gauge: 10 square segments, lit to the level; click / drag to set
+   local r = b.vgauge
+@@ -1957,7 +2027,7 @@ local function draw_f22(ass, p, b, w, h, pos, dur, st)
+   end
+   if p.rhero then if boot_ok(2) then
+     local ip = p.rhero.ip
+-    local hf, vf = math.floor(fs * 0.68), math.floor(fs * 0.95)
++    local hf, vf = math.max(13, math.floor(fs * 0.74)), math.max(14, math.floor(fs * 1.0))
+     local function head(r, label, val, vcol, valpha)       -- valpha: ghosted value (hover preview)
+       local hy = r.y + ip + math.floor(fs * 0.45)
+       mtext(ass, r.x + ip + 2, hy, hf, "FFFFFF", 0x58, label, 4, "\\fsp2")
+@@ -2012,7 +2082,7 @@ local function draw_f22(ass, p, b, w, h, pos, dur, st)
+       local function half(x, on, txt, col)
+         local h = not on and hv == (x == x0 and 1 or 2)
+         shape(ass, on and col or "FFFFFF", on and 0x00 or (h and 0x98 or 0xC8), function(d) d:rect_cw(x, ty, x + hw, ty + sh) end)
+-        mtext(ass, x + hw / 2, ty + sh / 2, math.floor(fs * 0.62), on and INK or "FFFFFF", on and 0x00 or 0x70, txt, 5, "\\b1\\fsp1")
++        mtext(ass, x + hw / 2, ty + sh / 2, math.max(sh >= 18 and 13 or 10, math.floor(fs * 0.66)), on and INK or "FFFFFF", on and 0x00 or 0x70, txt, 5, "\\b1\\fsp1")
+       end
+       half(x0, not loop, "OFF", ACCENT)
+       half(x0 + hw + 3, loop, "ON", AMBER)
+@@ -2068,7 +2138,7 @@ end
+ -- by the normal render pass, gone on the next one once the pointer leaves)
+ local inside                           -- (set below, with hit())
+ local KEYCAP = { back = "J", play = "K", fwd = "L", vol = "M", vgauge = "\u2191\u2193", spd = "< >", loop = "R",
+-  link = "I", hud = "H", pin = "P", smaller = "-", larger = "=", fs = "F", new = "O", help = "?", seek = "0-9 \u2190 \u2192" }
++  link = "I", hud = "H", pin = "P", smaller = "-", larger = "=", fs = "F", new = "O", help = "?", night = "N", seek = "0-9 \u2190 \u2192" }
+ local KEYCAP_ABOVE = { hud = true, pin = true, smaller = true, larger = true, fs = true }
+ local function keycaps(ass, p, b)
+   local f = math.max(8, math.floor(p.fs * 0.9))
+@@ -2080,6 +2150,7 @@ local function keycaps(ass, p, b)
+       local cw = math.floor(select(2, s:gsub("[^\128-\191]", "")) * f * 0.62 + f * 0.75)
+       local x, y
+       if name == "new" then x, y = r.x + r.w + 3, r.y + (r.h - ch) / 2
++      elseif name == "night" then x, y = r.x + (r.w - cw) / 2, r.y - ch - 2
+       elseif name == "help" then x, y = r.x - 3 - cw, r.y + (r.h - ch) / 2
+       elseif name == "play" then x, y = r.x + (r.w - cw) / 2, r.y - ch * 0.6
+       elseif KEYCAP_ABOVE[name] then x, y = r.x + (r.w - cw) / 2, r.y - ch - 2
+@@ -2094,6 +2165,8 @@ local function keycaps(ass, p, b)
+   for _, c in ipairs(caps) do mtext(ass, c.x + c.w / 2, c.y + ch / 2, f, ACCENT, 0x00, c.s, 5, "\\b1") end
+ end
+ render = function()
++  if hud.dead then return end
++  if (hud.night or 0) > 0 and hud.night_draw then hud.night_draw() end
+   frame.t = mp.get_time()
+   local w, h = mp.get_osd_size()
+   if not w or w <= 0 or h <= 0 then ov:remove(); return end
+@@ -2184,47 +2257,60 @@ render = function()
+       if style == "f22" and p.eq and eq.have and boot_ok(4) then draw_meter(ass, p, p.eq, muted)
+       else g_vol(ass, p, r, c, al, muted, mp.get_property_number("volume")) end
+     end)
+-    btn("smaller", false, function(r, c, al) g_line(ass, r, c, al, false, k) end)
+-    btn("larger", false, function(r, c, al) g_line(ass, r, c, al, true, k) end)
+-    btn("fs", full, function(r, c, al) g_fs(ass, r, c, al, full, k) end)
+-    btn("hud", false, function(r, c, al)            -- CRUISE: small neon green dot on (a nudge to engage); COMBAT: tile muted gray, dot off
+-      local q = math.max(4, math.floor(r.h * 0.2))
+-      local lx, ly = r.x + r.w - q - math.max(2, math.floor(r.h * 0.12)), r.y + math.max(2, math.floor(r.h * 0.12))
+-      local cx, cy, rr = lx + q / 2, ly + q / 2, q / 2
+-      local function dot(d, rad)                    -- 16-gon (shape() records polygons only)
+-        d:move_to(cx + rad, cy)
+-        for i = 1, 15 do local t = i * math.pi / 8; d:line_to(cx + rad * math.cos(t), cy + rad * math.sin(t)) end
+-      end
+-      local lc, la = c, al
+-      if hud.light then                              -- static draw only, no timers: dot + one tight halo
+-        shape(ass, TILE_GREEN, 0xB8, function(d) dot(d, rr + 2) end)
