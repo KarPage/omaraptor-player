@@ -1,0 +1,194 @@
+-        shape(ass, TILE_GREEN, 0x00, function(d) dot(d, rr) end)
+-        if q >= 8 then shape(ass, TILE_CORE, 0x30, function(d) dot(d, rr * 0.45) end) end
++    local function key_icon(r)
++      if r.h >= 42 then return { x = r.x, y = r.y + math.floor(r.h * 0.02), w = r.w, h = math.floor(r.h * 0.60) } end
++      return r
++    end
++    local function key_word(r, txt, lit)
++      if r.h < 28 then return end
++      local fs2 = math.max(13, math.floor(r.h * (r.h >= 42 and 0.26 or 0.34)))
++      local y = r.h >= 42 and (r.y + r.h - math.floor(r.h * 0.16)) or (r.y + math.floor(r.h * 0.64))
++      mtext(ass, r.x + r.w / 2, y, fs2, lit and "E6FFE0" or TILE_GRAY, lit and 0x00 or 0x28, txt, 5, "\\b1\\fsp1")
++    end
++    btn("smaller", false, function(r, c, al) g_line(ass, key_icon(r), c, al, false, math.max(k, math.floor(r.h * 0.09))) end)
++    btn("larger", false, function(r, c, al) g_line(ass, key_icon(r), c, al, true, math.max(k, math.floor(r.h * 0.09))) end)
++    btn("fs", full, function(r, c, al) g_fs(ass, key_icon(r), c, al, full, math.max(k, math.floor(r.h * 0.08))) end)
++    btn("hud", false, function(r, c, al)            -- CRUISE: square lamp on; COMBAT: lamp hollow, word dim
++      local q = math.max(6, math.floor(r.h * 0.22))
++      local m = math.max(3, math.floor(r.h * 0.10))
++      local lx, ly = r.x + m, r.y + m
++      if hud.light then
++        shape(ass, TILE_GREEN, 0x00, function(d) d:rect_cw(lx, ly, lx + q, ly + q) end)
++        shape(ass, TILE_CORE, 0x30, function(d) d:rect_cw(lx + 1, ly + 1, lx + q - 1, ly + math.max(2, math.floor(q * 0.45))) end)
+       else
+-        shape(ass, TILE_GRAY, 0xA0, function(d) dot(d, rr) end)   -- dot off
+-        if state.hot ~= "hud" then lc, la = TILE_GRAY, 0x30 end
++        shape(ass, TILE_GRAY, 0x40, function(d) outline(d, lx, ly, q, q, math.max(1, math.floor(q * 0.16))) end)
+       end
+-      mtext(ass, r.x + r.w / 2, r.y + math.floor(r.h * 0.6), math.max(7, math.floor(r.h * 0.3)), lc, la, "HUD", 5, "\\fsp1")
++      key_word(r, "HUD", hud.light)
+     end)
+-    btn("pin", false, function(r, c, al)           -- PIN: green lamp dot on while pinned (HUD-tile family), gray off
+-      local q = math.max(4, math.floor(r.h * 0.2))
+-      local lx, ly = r.x + r.w - q - math.max(2, math.floor(r.h * 0.12)), r.y + math.max(2, math.floor(r.h * 0.12))
+-      local cx, cy, rr = lx + q / 2, ly + q / 2, q / 2
+-      local function dot(d, rad)
+-        d:move_to(cx + rad, cy)
+-        for i = 1, 15 do local t = i * math.pi / 8; d:line_to(cx + rad * math.cos(t), cy + rad * math.sin(t)) end
+-      end
+-      local lc, la = c, al
+-      if hud.pin then
+-        shape(ass, TILE_GREEN, 0xB8, function(d) dot(d, rr + 2) end)
+-        shape(ass, TILE_GREEN, 0x00, function(d) dot(d, rr) end)
+-        if q >= 8 then shape(ass, TILE_CORE, 0x30, function(d) dot(d, rr * 0.45) end) end
++    btn("pin", hud.pin, function(r, c, al)           -- workspace pin: jade cap + fill when on, hollow when off
++      local on = hud.pin
++      local q = math.max(6, math.floor(r.h * 0.22))
++      local m = math.max(3, math.floor(r.h * 0.10))
++      if on then
++        shape(ass, ACCENT, 0x78, function(d) d:rect_cw(r.x + 2, r.y + 2, r.x + r.w - 2, r.y + r.h - 2) end)
++        shape(ass, ACCENT, 0x00, function(d)
++          d:rect_cw(r.x, r.y, r.x + r.w, r.y + math.max(3, math.floor(r.h * 0.10)))
++        end)
++        shape(ass, ACCENT, 0x00, function(d) d:rect_cw(r.x + m, r.y + m, r.x + m + q, r.y + m + q) end)
+       else
+-        shape(ass, TILE_GRAY, 0xA0, function(d) dot(d, rr) end)
+-        if state.hot ~= "pin" then lc, la = TILE_GRAY, 0x30 end
++        shape(ass, TILE_GRAY, 0x30, function(d) outline(d, r.x + m, r.y + m, q, q, math.max(1, math.floor(q * 0.16))) end)
+       end
+-      mtext(ass, r.x + r.w / 2, r.y + math.floor(r.h * 0.6), math.max(7, math.floor(r.h * 0.3)), lc, la, "PIN", 5, "\\fsp1")
++      key_word(r, "PIN", on)
+     end)
++    if b.smaller and b.larger and b.smaller.h >= 42 then
++      local mid = b.smaller.x + b.smaller.w + math.floor((b.larger.x - (b.smaller.x + b.smaller.w)) / 2)
++      mtext(ass, mid, b.smaller.y + b.smaller.h - math.floor(b.smaller.h * 0.16),
++        math.max(13, math.floor(b.smaller.h * 0.26)), TILE_GRAY, 0x20, "SIZE", 5, "\\b1\\fsp1")
++    end
++    if b.fs and b.fs.h >= 42 then key_word(b.fs, "FS", full) end
++    if b.smaller and b.larger and b.smaller.h >= 28 and b.smaller.h < 42 then
++      local f, y = 13, b.smaller.y + b.smaller.h + 10
++      if y + f < h then
++        local mid = b.smaller.x + b.smaller.w + math.floor((b.larger.x - (b.smaller.x + b.smaller.w)) / 2)
++        mtext(ass, mid, y, f, TILE_GRAY, 0x18, "SIZE", 5, "\\b1\\fsp1")
++        if b.fs then mtext(ass, b.fs.x + b.fs.w / 2, y, f, full and "E6FFE0" or TILE_GRAY, 0x18, "FS", 5, "\\b1\\fsp1") end
++      end
++    end
+   end
+   if style == "f22" and not b.seek then draw_f22(ass, p, b, w, h) end
+   for _, name in ipairs({ "new", "help" }) do   -- top corners: small hairline squares
+@@ -2232,7 +2318,30 @@ render = function()
+     shape(ass, INK, 0xA8, function(d) d:rect_cw(r.x, r.y, r.x + r.w, r.y + r.h) end)
+     local col, al = chrome(ass, p, name, r, false)
+     if name == "new" then g_line(ass, r, col, al, true, k)
+-    else mtext(ass, r.x + r.w / 2, r.y + r.h / 2, math.floor(p.fs * 1.3), col, al, "?", 5) end
++    else mtext(ass, r.x + r.w / 2, r.y + r.h / 2, math.max(13, math.floor(p.fs * 1.05)), col, al, "?", 5) end
++  end
++  if b.night then
++    local r = b.night
++    local lvl = hud.night or 0
++    shape(ass, INK, 0xA8, function(d) d:rect_cw(r.x, r.y, r.x + r.w, r.y + r.h) end)
++    local col, al = chrome(ass, p, "night", r, lvl > 0)
++    local word, sub
++    if r.w >= r.h * 3 then word, sub = "NIGHT", ({ "OFF", "DIM", "DIMMER" })[lvl + 1]
++    elseif r.w >= r.h * 1.8 then word = ({ "OFF", "DIM", "DIM+" })[lvl + 1]
++    else word = "N" end
++    local fs2 = math.max(13, math.floor(math.min(r.h * 0.46, r.w / (sub and 8 or #word) * 1.15)))
++    if lvl > 0 then
++      shape(ass, ACCENT, 0x00, function(d)
++        d:rect_cw(r.x, r.y, r.x + r.w, r.y + math.max(2, math.floor(r.h * 0.14)))
++      end)
++    end
++    if sub then
++      local pad = math.max(6, math.floor(r.h * 0.22))
++      mtext(ass, r.x + pad, r.y + r.h / 2, fs2, col, al, word, 4, "\\b1\\fsp1")
++      mtext(ass, r.x + r.w - pad, r.y + r.h / 2, math.max(13, math.floor(fs2 * 0.86)), lvl > 0 and "E6FFE0" or col, al, sub, 6, "\\b1")
++    else
++      mtext(ass, r.x + r.w / 2, r.y + r.h / 2, fs2, col, al, word, 5, "\\b1\\fsp1")
++    end
+   end
+   if hud.keyhints and not state.dragging and not state.vdrag then keycaps(ass, p, b) end   -- KEY HINTS (? panel, T): on every control, no hover; off by default
+   local ht = state.htag                          -- hover seek tag: top z, mm:ss.mmm, clamped to the bar
+@@ -2264,7 +2373,7 @@ end
+ -- input section: only the bar captures clicks ----------------------------------------------
+ local function publish()  -- user-data/omaraptor-hud: handy for IPC checks
+   mp.set_property_native("user-data/omaraptor-hud", { visible = state.visible, position = "bottom",
+-    panel = state.panel, pinned = hud.pin })
++    panel = state.panel, pinned = hud.pin, night = hud.night or 0 })
+ end
+ 
+ local tips_open = false
+@@ -2273,6 +2382,9 @@ local function set_section(on)
+     local p, hb = state.panel, state.buttons.help
+     mp.set_mouse_area(p.x, p.y, p.x + p.w, p.y + p.h, SECTION)
+     if hb then mp.set_mouse_area(hb.x, hb.y, hb.x + hb.w, hb.y + hb.h, HELP_SECTION) end
++    local nb2 = state.buttons.night
++    if nb2 then mp.set_mouse_area(nb2.x, nb2.y, nb2.x + nb2.w, nb2.y + nb2.h, hud.NIGHT_SECTION)
++    else mp.set_mouse_area(0, 0, 0, 0, hud.NIGHT_SECTION) end
+     local nb = state.buttons.new
+     if nb then mp.set_mouse_area(nb.x, nb.y, nb.x + nb.w, nb.y + nb.h, NEW_SECTION) end
+     for k, sec in pairs(TAPES) do
+@@ -2283,6 +2395,7 @@ local function set_section(on)
+       -- no "allow-vo-dragging": a press on the bar must not start a window drag
+       mp.input_enable_section(SECTION, "allow-hide-cursor")
+       mp.input_enable_section(HELP_SECTION, "allow-hide-cursor")
++      mp.input_enable_section(hud.NIGHT_SECTION, "allow-hide-cursor")
+       mp.input_enable_section(NEW_SECTION, "allow-hide-cursor")
+       for _, sec in pairs(TAPES) do mp.input_enable_section(sec, "allow-hide-cursor") end
+       state.section_on = true
+@@ -2294,6 +2407,7 @@ local function set_section(on)
+   elseif not on and state.section_on then
+     mp.input_disable_section(SECTION)
+     mp.input_disable_section(HELP_SECTION)
++    mp.input_disable_section(hud.NIGHT_SECTION)
+     mp.input_disable_section(NEW_SECTION)
+     for _, sec in pairs(TAPES) do mp.input_disable_section(sec) end
+     state.section_on = false
+@@ -2349,7 +2463,7 @@ local function arm_hide(secs)
+ end
+ 
+ local function show(secs)
+-  if state.boot then return end      -- boot sequence on screen: the HUD comes in after it
++  if hud.dead or state.boot then return end      -- boot sequence on screen: the HUD comes in after it
+   if not state.visible then
+     state.visible = true
+     tick_timer:resume()
+@@ -2375,12 +2489,87 @@ end)
+ hide_timer:kill()
+ tick_timer = mp.add_periodic_timer(0.5, render)   -- keeps the clock / progress moving
+ tick_timer:kill()
+-function hud.toggle_pin(v)       -- PIN: frame + bar stay up (living frame); unpin = normal 7 s hide
++function hud.apply_wpin(on)     -- Hyprland pin follows workspaces; dispatch only from the launcher
++  mp.command_native_async({ name = "subprocess", args = { OMARAPTOR, "pin", on and "on" or "off" },
++    playback_only = false, capture_stdout = true, capture_stderr = true }, function() end)
++end
++function hud.toggle_pin(v)       -- PIN: every workspace, on top, and the frame stays up
+   if v == nil then hud.pin = not hud.pin else hud.pin = v and true or false end
++  hud.apply_wpin(hud.pin)
+   if hud.pin then show() else render(); arm_hide() end
+   publish()
+   return hud.pin
+ end
++function hud.night_eq()
++  local lvl, b, g, s = hud.night or 0, 0, 0, 0
++  if lvl == 1 then b, g, s = -14, 6, -10
++  elseif lvl == 2 then b, g, s = -30, -6, -20 end
++  mp.set_property_number("brightness", b)
++  mp.set_property_number("gamma", g)
++  mp.set_property_number("saturation", s)
++end
++function hud.night_draw()
++  local lvl = hud.night or 0
++  if hud.dead or lvl == 0 then if hud.veil then hud.veil:remove() end; return end
++  local w, h = mp.get_osd_size()
++  if not w or w <= 0 or not h or h <= 0 then return end
++  local col, al = "1E1408", 0xA6
++  if lvl >= 2 then col, al = "181006", 0x70 end
++  hud.veil.res_x, hud.veil.res_y = w, h
++  hud.veil.data = string.format(
++    "{\\an7\\pos(0,0)\\bord0\\shad0\\1c&H%s&\\1a&H%02X&\\p1}m 0 0 l %d 0 l %d %d l 0 %d{\\p0}",
++    col, al, w, w, h, h)
++  hud.veil:update()
++end
++function hud.night_save()
++  if os.getenv("OMR_NIGHT_NOSAVE") == "1" then return end
++  local val = ({ "off", "dim", "dimmer" })[(hud.night or 0) + 1] or "off"
