@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.0.4 (2026-11-07)
+
+- The window opens unpinned. It stays on the workspace where it opened and floats over the tiles there. PIN (the tile or `p`) pins it on every workspace, on top, and keeps the frame up. The tile lights jade while that is on. Fullscreen works pinned and unpinned (`allow_pin_fullscreen` stays on). `omaraptor pin [on|off|toggle|query]` is the same switch.
+- The PIN, HUD, size and fullscreen keys are larger, in line with the SPEED, REPEAT and LINK modules, and they scale with the window. Labels stay at least 13 px. On a very small window the words drop off instead of shrinking into a blur.
+- NIGHT cycles Off, Dim and Dimmer (`n` or the NIGHT tile). The picture gets a warm, softer tint from mpv brightness, gamma and saturation plus a light veil. Audio is unchanged and nothing rebuffers. The HUD dims one step with it. The level is saved in `script-opts/omaraptor-hud.conf`. Next video moved from `n` to `]`.
+- `install.sh` still copies every replaced file to `name.bak-omaraptor-YYYYMMDDHHMMSS` and never kills a running player. A player already on this HUD reloads in place and keeps playing. An older player keeps playing and picks the new HUD up the next time it opens.
+- Clipboard links can be Vimeo as well as the hosts from 1.0.3. Playback still depends on yt-dlp.
+
 ## 1.0.3 (2026-10-30)
 
 - Security fix: a video file with a fake, huge length (for example a Matroska file claiming 10^12 seconds) could make the seek tape and the REM tape build millions of tick marks. mpv then used all CPU and memory and could be killed. The tick spacing is now picked from the space on screen, so a tape never has more ticks than about one per 4 pixels, with a hard limit of 1024. The length of the video no longer decides how much is built.
