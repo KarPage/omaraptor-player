@@ -1,0 +1,480 @@
+        cap(b.smaller.x + b.smaller.w + math.floor((b.larger.x - b.smaller.x - b.smaller.w) / 2), "SIZE")
+      end
+      if b.fs then cap(b.fs.x + b.fs.w / 2, "FS") end
+      if b.hud then cap(b.hud.x + b.hud.w / 2, "HUD") end
+      if b.pin then cap(b.pin.x + b.pin.w / 2, "PIN") end
+    end
+  else
+    local function under(r, x, txt)
+      local f = math.floor(fs * 0.78)
+      if not (r and r.h < 28 and f >= 13) then return end
+      local y = r.y + r.h + math.floor(f * 0.55)
+      if y + f > h - 1 then return end
+      mtext(ass, x, y, f, "FFFFFF", 0x40, txt, 8, "\\fsp1")
+    end
+    under(b.hud, b.hud and b.hud.x + b.hud.w / 2, "HUD")
+    under(b.pin, b.pin and b.pin.x + b.pin.w / 2, "PIN")
+    under(b.smaller, b.smaller and b.smaller.x + b.smaller.w, "SIZE")
+    under(b.fs, b.fs and b.fs.x + b.fs.w / 2, "FS")
+  end
+  -- VOL gauge: 10 square segments, lit to the level; click / drag to set
+  local r = b.vgauge
+  if r and p.hero then
+    local hb = p.hero
+    local hot = state.hot == "vgauge" or state.vdrag == "vgauge"
+    local fc = muted and RUST or ACCENT
+    shape(ass, INK, 0x40, function(d) d:rect_cw(hb.x, hb.y, hb.x + hb.w, hb.y + hb.h) end)       -- machined frame
+    shape(ass, "FFFFFF", hot and 0x30 or 0x70, function(d) outline(d, hb.x, hb.y, hb.w, hb.h, 1) end)
+    shape(ass, "FFFFFF", 0xD8, function(d) outline(d, hb.x + 3, hb.y + 3, hb.w - 6, hb.h - 6, 1) end)
+    shape(ass, fc, 0x00, function(d)                                                             -- corner brackets
+      local l, t = math.max(5, math.floor(hb.h * 0.16)), 2
+      d:rect_cw(hb.x, hb.y, hb.x + l, hb.y + t); d:rect_cw(hb.x, hb.y, hb.x + t, hb.y + l)
+      d:rect_cw(hb.x + hb.w - l, hb.y, hb.x + hb.w, hb.y + t); d:rect_cw(hb.x + hb.w - t, hb.y, hb.x + hb.w, hb.y + l)
+      d:rect_cw(hb.x, hb.y + hb.h - t, hb.x + l, hb.y + hb.h); d:rect_cw(hb.x, hb.y + hb.h - l, hb.x + t, hb.y + hb.h)
+      d:rect_cw(hb.x + hb.w - l, hb.y + hb.h - t, hb.x + hb.w, hb.y + hb.h); d:rect_cw(hb.x + hb.w - t, hb.y + hb.h - l, hb.x + hb.w, hb.y + hb.h)
+    end)
+    local hy = hb.y + hb.ip + math.floor(hb.hh * 0.45)                                          -- header: VOL ...... 080
+    mtext(ass, hb.x + hb.ip + 2, hy, math.floor(fs * 0.68), "FFFFFF", 0x58, "VOL", 4, "\\fsp2")
+    mtext(ass, hb.x + hb.w - hb.ip - 2, hy, math.floor(fs * 0.95), fc, 0x00, string.format("%03d", math.floor(vol + 0.5)), 6, "\\b1\\fsp1")
+    -- notched scale + track + square thumb
+    local th = math.max(3, math.floor(r.h * 0.16))
+    local ty = math.floor(r.y + r.h * 0.38 - th / 2)
+    local fx = math.floor(r.x + r.w * math.min(1, vol / 100) + 0.5)
+    shape(ass, "FFFFFF", 0xC0, function(d) d:rect_cw(r.x, ty, r.x + r.w, ty + th) end)
+    if fx > r.x then shape(ass, fc, muted and 0x40 or 0x00, function(d) d:rect_cw(r.x, ty, fx, ty + th) end) end
+    local nb = ty + th + 3
+    local on, off = {}, {}
+    for i = 0, 20 do
+      local x = math.min(r.x + r.w - 1, math.floor(r.x + r.w * i / 20))
+      local l = (i % 10 == 0) and math.floor(r.h * 0.34) or ((i % 2 == 0) and math.floor(r.h * 0.2) or math.floor(r.h * 0.1))
+      local list = x <= fx and on or off
+      list[#list + 1] = { x, math.max(2, l) }
+    end
+    shape(ass, "FFFFFF", 0x80, function(d) for _, k in ipairs(off) do d:rect_cw(k[1], nb, k[1] + 1, nb + k[2]) end end)
+    if #on > 0 then shape(ass, fc, 0x10, function(d) for _, k in ipairs(on) do d:rect_cw(k[1], nb, k[1] + 1, nb + k[2]) end end) end
+    local q = math.max(10, math.floor(r.h * 0.78 / 2) * 2)
+    local qy = math.floor(ty + th / 2 - q / 2)
+    shape(ass, fc, 0x00, function(d) d:rect_cw(fx - q / 2, qy, fx + q / 2, qy + q) end, 1, INK, 0x00)
+    shape(ass, INK, 0x20, function(d) d:rect_cw(fx, qy + 2, fx + 1, qy + q - 2) end)              -- grip line
+  elseif r then
+    -- slim notched scale: dim track, jade fill to the level, notches every 10 % (50 % / 100 % long),
+    -- square needle at the level; deliberately unlike the cell meter on the MUTE key
+    local th = math.max(3, math.floor(r.h * 0.22))
+    local ty = math.floor(r.y + r.h * 0.42 - th / 2)
+    local fx = math.floor(r.x + r.w * math.min(1, vol / 100) + 0.5)
+    local fc = muted and RUST or ACCENT
+    shape(ass, "FFFFFF", 0xC0, function(d) d:rect_cw(r.x, ty, r.x + r.w, ty + th) end)
+    if fx > r.x then shape(ass, fc, muted and 0x40 or 0x00, function(d) d:rect_cw(r.x, ty, fx, ty + th) end) end
+    local nb = ty + th + 2
+    local on, off = {}, {}
+    for i = 0, 10 do
+      local x = math.min(r.x + r.w - 1, math.floor(r.x + r.w * i / 10))
+      local l = (i % 5 == 0) and math.floor(r.h * 0.32) or math.floor(r.h * 0.16)
+      local list = x <= fx and on or off
+      list[#list + 1] = { x, l }
+    end
+    shape(ass, "FFFFFF", 0x80, function(d) for _, k in ipairs(off) do d:rect_cw(k[1], nb, k[1] + 1, nb + k[2]) end end)
+    if #on > 0 then shape(ass, fc, 0x10, function(d) for _, k in ipairs(on) do d:rect_cw(k[1], nb, k[1] + 1, nb + k[2]) end end) end
+    local nw = math.max(3, math.floor(th * 0.9))
+    shape(ass, fc, 0x00, function(d) d:rect_cw(fx - math.floor(nw / 2), r.y, fx - math.floor(nw / 2) + nw, ty + th + 1) end, 1, INK, 0x20)
+    if hot then shape(ass, ACCENT, 0x00, function(d) outline(d, r.x - 3, r.y - 3, r.w + 6, r.h + 6, 1) end) end
+    -- label: dim "VOL" tag + the number bright and a touch larger (jade like ELP / REM; rust when muted)
+    local cxv, nf = math.floor(r.x + r.w / 2), math.floor(fs * 0.86)
+    local tf = math.floor(fs * 0.68)
+    mtext(ass, cxv - math.floor(fs * 0.25), p.laby + (nf - tf), tf, muted and RUST or "FFFFFF", muted and 0x30 or 0x58,
+      "VOL", 9, "\\fsp2")
+    mtext(ass, cxv + math.floor(fs * 0.05), p.laby, nf, muted and RUST or ACCENT, 0x00,
+      string.format("%03d", math.floor(vol + 0.5)), 7, "\\b1\\fsp1")
+  end
+  -- softkeys / lamps
+  local spd = mp.get_property_number("speed") or 1
+  local loop = (mp.get_property("loop-file") or "no") ~= "no"
+  local function lamp(name, on, txt)
+    local rr = b[name]; if not rr then return end
+    local col, al = chrome(ass, p, name, rr, on)
+    mtext(ass, rr.x + rr.w / 2, rr.y + rr.h / 2, lf, col, al, txt, 5, "\\fsp1")
+  end
+  if p.rhero then if boot_ok(2) then
+    local ip = p.rhero.ip
+    local hf, vf = math.max(13, math.floor(fs * 0.74)), math.max(14, math.floor(fs * 1.0))
+    local function head(r, label, val, vcol, valpha)       -- valpha: ghosted value (hover preview)
+      local hy = r.y + ip + math.floor(fs * 0.45)
+      mtext(ass, r.x + ip + 2, hy, hf, "FFFFFF", 0x58, label, 4, "\\fsp2")
+      if val then mtext(ass, r.x + r.w - ip - 2, hy, vf, vcol, valpha or 0x00, val, 6, "\\b1\\fsp1") end
+      return r.y + ip + math.floor(fs * 1.05)                -- top of the instrument area
+    end
+    -- SPEED: stepped selector 0.50 .. 2.00x in 0.25 steps; lit up to the rate, the rate cell framed
+    do
+      local r = b.spd
+      local off = math.abs(spd - 1) > 0.001
+      local vc = off and AMBER or ACCENT
+      ibox(ass, r, state.hot == "spd", off and AMBER or ACCENT)
+      local n, gp = 7, math.max(2, math.floor(r.w / 60))
+      local x0, x1 = r.x + ip + 3, r.x + r.w - ip - 3
+      local cw = math.floor((x1 - x0 - (n - 1) * gp) / n)
+      local hy0 = r.y + ip + math.floor(fs * 1.05)
+      r.cells = { x0 = x0, cw = cw, gp = gp, n = n, y0 = hy0 - 2 }     -- click / hover targets (one per cell)
+      local hv = state.hot == "spd" and spd_cell_at(r, state.mx, state.my)
+      local ty = head(r, "SPEED", string.format("%.2fx", hv and SPD_STEPS[hv] or spd), hv and "FFFFFF" or vc, hv and 0x70)
+      local ch = math.max(4, math.floor((r.y + r.h - ip - ty) * 0.42))
+      local cur = math.floor((math.max(0.5, math.min(2, spd)) - 0.5) / 0.25 + 0.5) + 1
+      for i = 1, n do
+        local x = x0 + (i - 1) * (cw + gp)
+        local lit = i <= cur
+        local one = i == 3                                  -- 1.00x reference step
+        shape(ass, lit and vc or "FFFFFF", lit and (i == cur and 0x00 or 0x50) or (one and 0x90 or 0xC0),
+          function(d) d:rect_cw(x, ty + 1, x + cw, ty + 1 + ch) end)
+        if i == cur then shape(ass, "FFFFFF", 0x00, function(d) outline(d, x - 2, ty - 1, cw + 4, ch + 4, 1) end)
+        elseif i == hv then shape(ass, AMBER, 0x30, function(d) outline(d, x - 2, ty - 1, cw + 4, ch + 4, 1) end) end
+      end
+      local lf3 = math.max(7, math.floor(fs * 0.56))
+      local ly3 = ty + ch + 4
+      mtext(ass, x0, ly3, lf3, "FFFFFF", 0x80, "0.5", 7)
+      mtext(ass, x0 + 2 * (cw + gp) + cw / 2, ly3, lf3, "FFFFFF", 0x60, "1.0", 8)
+      mtext(ass, x0 + 6 * (cw + gp) + cw, ly3, lf3, "FFFFFF", 0x80, "2.0", 9)
+    end
+    -- REPEAT: OFF | ON switch with a lamp
+    do
+      local r = b.loop
+      ibox(ass, r, state.hot == "loop", loop and AMBER or ACCENT)
+      local ty = head(r, "REPEAT", nil)
+      local q = math.max(5, math.floor(fs * 0.5))           -- status lamp, top right
+      shape(ass, loop and AMBER or "FFFFFF", loop and 0x00 or 0xA0, function(d)
+        d:rect_cw(r.x + r.w - ip - 2 - q, r.y + ip + math.floor(fs * 0.45) - q / 2, r.x + r.w - ip - 2, r.y + ip + math.floor(fs * 0.45) + q / 2)
+      end)
+      local x0, x1 = r.x + ip + 3, r.x + r.w - ip - 3
+      local hw = math.floor((x1 - x0 - 3) / 2)
+      local sh = math.max(8, r.y + r.h - ip - 2 - ty)
+      r.halves = { x0 = x0, hw = hw, y0 = ty - 2 }           -- OFF | ON are direct click targets
+      local hv = state.hot == "loop" and state.my and state.my >= ty - 2 and
+        (state.mx < x0 + hw + 2 and 1 or 2)
+      local function half(x, on, txt, col)
+        local h = not on and hv == (x == x0 and 1 or 2)
+        shape(ass, on and col or "FFFFFF", on and 0x00 or (h and 0x98 or 0xC8), function(d) d:rect_cw(x, ty, x + hw, ty + sh) end)
+        mtext(ass, x + hw / 2, ty + sh / 2, math.max(sh >= 18 and 13 or 10, math.floor(fs * 0.66)), on and INK or "FFFFFF", on and 0x00 or 0x70, txt, 5, "\\b1\\fsp1")
+      end
+      half(x0, not loop, "OFF", ACCENT)
+      half(x0 + hw + 3, loop, "ON", AMBER)
+    end
+    -- BUFFER: live bar graph of cache seconds (last ~10 s at 4 Hz), 0 .. 60 s scale
+    do
+      local r = b.link
+      local txt, col = link_state()
+      local secs = txt:match("(%d+)s")
+      ibox(ass, r, state.hot == "link", col == AMBER and AMBER or ACCENT)
+      local ty = head(r, "LINK", secs and (secs .. "s") or "LOCAL", col == "FFFFFF" and "FFFFFF" or col)
+      local x0, x1 = r.x + ip + 3, r.x + r.w - ip - 3
+      local yb = r.y + r.h - ip - 2
+      local hh = math.max(6, yb - ty)
+      local n = math.max(8, math.floor((x1 - x0) / 5))
+      local bw = math.max(2, math.floor((x1 - x0) / n) - 1)
+      shape(ass, "FFFFFF", 0xD8, function(d) d:rect_cw(x0, ty, x1, yb) end)
+      shape(ass, "FFFFFF", 0x90, function(d)                -- 10 / 30 s grid lines
+        for _, v in ipairs({ 10, 30 }) do local y = math.floor(yb - hh * v / 60); d:rect_cw(x0, y, x1, y + 1) end
+      end)
+      local hist = linkh
+      local lo, hi = {}, {}
+      for i = 1, n do
+        local v = hist[#hist - n + i]
+        if v then
+          local x = x0 + (i - 1) * (bw + 1)
+          local bh = math.max(1, math.floor(math.min(60, v) / 60 * hh))
+          local list = v < 5 and lo or hi
+          list[#list + 1] = { x, yb - bh }
+        end
+      end
+      shape(ass, ACCENT, 0x00, function(d) for _, k in ipairs(hi) do d:rect_cw(k[1], k[2], k[1] + bw, yb) end end)
+      if #lo > 0 then shape(ass, AMBER, 0x00, function(d) for _, k in ipairs(lo) do d:rect_cw(k[1], k[2], k[1] + bw, yb) end end) end
+    end
+  end else
+  lamp("spd", math.abs(spd - 1) > 0.001, string.format("SPD %.2fx", spd))
+  lamp("loop", loop, "LOOP")
+  if b.spd then lab(b.spd.x + b.spd.w / 2, "SPEED") end
+  if b.loop then lab(b.loop.x + b.loop.w / 2, "REPEAT") end
+  local lk = p.link
+  if lk then
+    local txt, col, al = link_state()
+    shape(ass, "FFFFFF", 0xB0, function(d) outline(d, lk.x, lk.y, lk.w, lk.h, 1) end)
+    local q = math.floor(lk.h * 0.28)
+    shape(ass, col, al, function(d) d:rect_cw(lk.x + q, lk.y + lk.h / 2 - q / 2, lk.x + 2 * q, lk.y + lk.h / 2 + q / 2) end)
+    mtext(ass, lk.x + lk.w - math.floor(lf * 0.5), lk.y + lk.h / 2, lf, col, al == 0x80 and 0x60 or 0x00, txt, 6, "\\fsp1")
+    lab(lk.x + lk.w / 2, "BUFFER")
+  end
+  end
+end
+
+-- hover key hints: while the pointer rests on the bar every tile shows its key (no timer: drawn
+-- by the normal render pass, gone on the next one once the pointer leaves)
+local inside                           -- (set below, with hit())
+local KEYCAP = { back = "J", play = "K", fwd = "L", vol = "M", vgauge = "↑↓", spd = "< >", loop = "R",
+  link = "I", hud = "H", pin = "P", smaller = "-", larger = "=", fs = "F", new = "O", help = "?", night = "N", seek = "0-9 ← →" }
+local KEYCAP_ABOVE = { hud = true, pin = true, smaller = true, larger = true, fs = true }
+local function keycaps(ass, p, b)
+  local f = math.max(8, math.floor(p.fs * 0.9))
+  local ch, t = math.floor(f * 1.45), math.max(1, p.t or 1)
+  local caps = {}
+  for name, s in pairs(KEYCAP) do
+    local r = b[name]
+    if r then
+      local cw = math.floor(select(2, s:gsub("[^\128-\191]", "")) * f * 0.62 + f * 0.75)
+      local x, y
+      if name == "new" then x, y = r.x + r.w + 3, r.y + (r.h - ch) / 2
+      elseif name == "night" then x, y = r.x + (r.w - cw) / 2, r.y - ch - 2
+      elseif name == "help" then x, y = r.x - 3 - cw, r.y + (r.h - ch) / 2
+      elseif name == "play" then x, y = r.x + (r.w - cw) / 2, r.y - ch * 0.6
+      elseif KEYCAP_ABOVE[name] then x, y = r.x + (r.w - cw) / 2, r.y - ch - 2
+      elseif name == "seek" and p.remx then x, y = p.remx - cw, p.remy - ch - 3
+      elseif name == "seek" then x, y = r.x + r.w - cw, r.y - ch - 2
+      else x, y = r.x + r.w - cw, r.y - ch * 0.6 end
+      caps[#caps + 1] = { x = math.floor(x), y = math.floor(y), w = cw, s = s }
+    end
+  end
+  shape(ass, INK, 0x73, function(d) for _, c in ipairs(caps) do d:rect_cw(c.x, c.y, c.x + c.w, c.y + ch) end end)
+  shape(ass, ACCENT, 0x10, function(d) for _, c in ipairs(caps) do outline(d, c.x, c.y, c.w, ch, t) end end)
+  for _, c in ipairs(caps) do mtext(ass, c.x + c.w / 2, c.y + ch / 2, f, ACCENT, 0x00, c.s, 5, "\\b1") end
+end
+render = function()
+  if hud.dead then return end
+  if (hud.night or 0) > 0 and hud.night_draw then hud.night_draw() end
+  frame.t = mp.get_time()
+  local w, h = mp.get_osd_size()
+  if not w or w <= 0 or h <= 0 then ov:remove(); return end
+  local p, b = layout(w, h)
+  state.panel, state.buttons = p, b
+  if state.fade <= 0 then ov:remove(); return end
+  local ass = assdraw.ass_new()
+  local paused, muted = mp.get_property_bool("pause"), mp.get_property_bool("mute")
+  local full = mp.get_property_bool("fullscreen")
+  local k = stroke(p)
+  if b.seek then
+    if HUD() then            -- instrument module: dark glass, 1px frame, brackets, scanlines
+      shape(ass, INK, 0x40, function(d) d:rect_cw(p.x, p.y, p.x + p.w, p.y + p.h) end)
+      shape(ass, "FFFFFF", 0xF6, function(d)
+        for y = p.y + 2, p.y + p.h - 2, 3 do d:rect_cw(p.x + 1, y, p.x + p.w - 1, y + 1) end
+      end)
+      shape(ass, "FFFFFF", 0xB8, function(d) outline(d, p.x, p.y, p.w, p.h, 1) end)
+      shape(ass, ACCENT, 0x00, function(d) ticks(d, p.x, p.y, p.w, p.h, 2, math.floor(p.u * 0.5)) end)
+      local nb, hb = b.new, b.help           -- rails tying the corner buttons to the module
+      shape(ass, ACCENT, 0x98, function(d)
+        local y0 = nb.y + nb.h + (style == "f22" and math.floor(p.fs * 1.5) or 4)
+        d:rect_cw(nb.x, y0, nb.x + 1, p.y - 4)
+        d:rect_cw(hb.x + hb.w - 1, y0, hb.x + hb.w, p.y - 4)
+      end)
+    elseif style == "frame" then          -- one hairline panel with jade corner ticks
+      shape(ass, INK, 0x48, function(d) d:rect_cw(p.x, p.y, p.x + p.w, p.y + p.h) end)
+      shape(ass, ACCENT, 0x90, function(d) outline(d, p.x, p.y, p.w, p.h, p.t) end)
+      shape(ass, ACCENT, 0x00, function(d) ticks(d, p.x, p.y, p.w, p.h, p.t + 1, math.floor(p.u * 0.45)) end)
+    else                              -- no container: a soft dark scrim rising from the edge
+      local y0, N = p.y - p.u, 32
+      local deep = style == "edge" and 0x30 or 0x60
+      for i = 0, N - 1 do
+        local ya, yb = math.floor(y0 + (h - y0) * i / N), math.floor(y0 + (h - y0) * (i + 1) / N)
+        local al = 255 - math.floor((255 - deep) * ((i + 1) / N) ^ 1.6)
+        shape(ass, INK, al, function(d) d:rect_cw(0, ya, w, yb) end)
+      end
+    end
+    draw_seek(ass, p, b.seek)
+    local pos, dur = mp.get_property_number("time-pos"), mp.get_property_number("duration")
+    local s = status_text()
+    local fs = p.fs
+    local mx, my = p.mid.x, p.mid.cy
+    local room = math.floor(p.mid.w / (fs * 0.62))
+    if HUD() then
+      if style == "f22" then draw_f22(ass, p, b, w, h, pos, dur, s); if boot_ok(2) then draw_title(ass, p, w, h) end else
+      -- digital readout row above the scale: STATUS left, elapsed / total right
+      local ry = p.y + (p.tth or 0) + math.floor(p.u * 0.3 + fs * 0.6)
+      mtext(ass, p.cx1, ry, fs, "FFFFFF", 0x00,
+        dtime(pos) .. C("FFFFFF", 0x90) .. " / " .. dtime(dur), 6, "\\fsp1")
+      mtext(ass, p.cx0, ry, math.floor(fs * 0.92), ACCENT, 0x00,
+        st_icon(math.floor(fs * 0.92), s == "PAUSED") .. (s or "PLAYING"), 4, "\\fsp3")
+      draw_title(ass, p, w, h)
+      local function lab(x, txt) mtext(ass, x, p.laby, math.floor(fs * 0.72), "FFFFFF", 0x58, txt, 8, "\\fsp2") end
+      if b.vol then lab(b.vol.x + b.vol.w / 2, "VOL") end
+      if b.smaller then lab(b.smaller.x + b.smaller.w, "SIZE") end
+      if b.fs then lab(b.fs.x + b.fs.w / 2, "FS") end
+      end
+    elseif style == "edge" then
+      mtext(ass, p.tl.x, p.tl.y, fs, "FFFFFF", 0x00, fmt_time(pos), 4)
+      mtext(ass, p.tr.x, p.tr.y, fs, "FFFFFF", 0x60, fmt_time(dur), 6)
+      if s and #s <= room then mtext(ass, mx, my, math.floor(fs * 0.95), ACCENT, 0x00, s, 4, "\\fsp3") end
+    else
+      local tm = fmt_time(pos) .. " / " .. fmt_time(dur)
+      local body = C("FFFFFF", 0x00) .. fmt_time(pos) .. C("FFFFFF", 0x70) .. " / " .. fmt_time(dur)
+      local sl = s and (style == "segment" and "[" .. s .. "]" or s)
+      if sl and #sl + 2 + #tm <= room then
+        body = C(ACCENT, 0x00) .. (style == "frame" and "{\\fsp2}" or "") .. sl .. "{\\fsp0}" .. C("FFFFFF", 0x80) .. "  " .. body
+      elseif sl and #sl <= room then body = C(ACCENT, 0x00) .. sl
+      elseif #tm > room then body = C("FFFFFF", 0x00) .. fmt_time(pos) end
+      if room >= 4 then mtext(ass, mx, my, fs, "FFFFFF", 0x00, body, 4) end
+    end
+    local function btn(name, on, glyph)
+      local r = b[name]; if not r then return end
+      local col, al = chrome(ass, p, name, r, on)
+      glyph(r, col, al)
+    end
+    btn("back", false, function(r, c, al) mtext(ass, r.x + r.w / 2, r.y + r.h / 2, math.floor(r.h * 0.38), c, al, "-10", 5) end)
+    if style == "f22" and b.play and not hud.light and boot_ok(1) then draw_dial(ass, p, b.play, paused, muted) else
+    btn("play", style == "f22" or not paused, function(r, c, al)   -- f22: jade while playing, amber while paused
+      g_play(ass, r, c, al, paused)
+      if paused and style == "f22" and r.h >= 30 then
+        mtext(ass, r.x + r.w / 2, r.y + r.h - math.floor(r.h * 0.07), math.max(7, math.floor(r.h * 0.13)), c, al, "HOLD", 2, "\\fsp2")
+      end
+    end)
+    end
+    btn("fwd", false, function(r, c, al) mtext(ass, r.x + r.w / 2, r.y + r.h / 2, math.floor(r.h * 0.38), c, al, "+10", 5) end)
+    btn("vol", muted, function(r, c, al)
+      if style == "f22" and p.eq and eq.have and boot_ok(4) then draw_meter(ass, p, p.eq, muted)
+      else g_vol(ass, p, r, c, al, muted, mp.get_property_number("volume")) end
+    end)
+    local function key_icon(r)
+      if r.h >= 42 then return { x = r.x, y = r.y + math.floor(r.h * 0.02), w = r.w, h = math.floor(r.h * 0.60) } end
+      return r
+    end
+    local function key_word(r, txt, lit)
+      if r.h < 28 then return end
+      local fs2 = math.max(13, math.floor(r.h * (r.h >= 42 and 0.26 or 0.34)))
+      local y = r.h >= 42 and (r.y + r.h - math.floor(r.h * 0.16)) or (r.y + math.floor(r.h * 0.64))
+      mtext(ass, r.x + r.w / 2, y, fs2, lit and "E6FFE0" or TILE_GRAY, lit and 0x00 or 0x28, txt, 5, "\\b1\\fsp1")
+    end
+    btn("smaller", false, function(r, c, al) g_line(ass, key_icon(r), c, al, false, math.max(k, math.floor(r.h * 0.09))) end)
+    btn("larger", false, function(r, c, al) g_line(ass, key_icon(r), c, al, true, math.max(k, math.floor(r.h * 0.09))) end)
+    btn("fs", full, function(r, c, al) g_fs(ass, key_icon(r), c, al, full, math.max(k, math.floor(r.h * 0.08))) end)
+    btn("hud", false, function(r, c, al)            -- CRUISE: square lamp on; COMBAT: lamp hollow, word dim
+      local q = math.max(6, math.floor(r.h * 0.22))
+      local m = math.max(3, math.floor(r.h * 0.10))
+      local lx, ly = r.x + m, r.y + m
+      if hud.light then
+        shape(ass, TILE_GREEN, 0x00, function(d) d:rect_cw(lx, ly, lx + q, ly + q) end)
+        shape(ass, TILE_CORE, 0x30, function(d) d:rect_cw(lx + 1, ly + 1, lx + q - 1, ly + math.max(2, math.floor(q * 0.45))) end)
+      else
+        shape(ass, TILE_GRAY, 0x40, function(d) outline(d, lx, ly, q, q, math.max(1, math.floor(q * 0.16))) end)
+      end
+      key_word(r, "HUD", hud.light)
+    end)
+    btn("pin", hud.pin, function(r, c, al)           -- workspace pin: jade cap + fill when on, hollow when off
+      local on = hud.pin
+      local q = math.max(6, math.floor(r.h * 0.22))
+      local m = math.max(3, math.floor(r.h * 0.10))
+      if on then
+        shape(ass, ACCENT, 0x78, function(d) d:rect_cw(r.x + 2, r.y + 2, r.x + r.w - 2, r.y + r.h - 2) end)
+        shape(ass, ACCENT, 0x00, function(d)
+          d:rect_cw(r.x, r.y, r.x + r.w, r.y + math.max(3, math.floor(r.h * 0.10)))
+        end)
+        shape(ass, ACCENT, 0x00, function(d) d:rect_cw(r.x + m, r.y + m, r.x + m + q, r.y + m + q) end)
+      else
+        shape(ass, TILE_GRAY, 0x30, function(d) outline(d, r.x + m, r.y + m, q, q, math.max(1, math.floor(q * 0.16))) end)
+      end
+      key_word(r, "PIN", on)
+    end)
+    if b.smaller and b.larger and b.smaller.h >= 42 then
+      local mid = b.smaller.x + b.smaller.w + math.floor((b.larger.x - (b.smaller.x + b.smaller.w)) / 2)
+      mtext(ass, mid, b.smaller.y + b.smaller.h - math.floor(b.smaller.h * 0.16),
+        math.max(13, math.floor(b.smaller.h * 0.26)), TILE_GRAY, 0x20, "SIZE", 5, "\\b1\\fsp1")
+    end
+    if b.fs and b.fs.h >= 42 then key_word(b.fs, "FS", full) end
+    if b.smaller and b.larger and b.smaller.h >= 28 and b.smaller.h < 42 then
+      local f, y = 13, b.smaller.y + b.smaller.h + 10
+      if y + f < h then
+        local mid = b.smaller.x + b.smaller.w + math.floor((b.larger.x - (b.smaller.x + b.smaller.w)) / 2)
+        mtext(ass, mid, y, f, TILE_GRAY, 0x18, "SIZE", 5, "\\b1\\fsp1")
+        if b.fs then mtext(ass, b.fs.x + b.fs.w / 2, y, f, full and "E6FFE0" or TILE_GRAY, 0x18, "FS", 5, "\\b1\\fsp1") end
+      end
+    end
+  end
+  if style == "f22" and not b.seek then draw_f22(ass, p, b, w, h) end
+  for _, name in ipairs({ "new", "help" }) do   -- top corners: small hairline squares
+    local r = b[name]
+    shape(ass, INK, 0xA8, function(d) d:rect_cw(r.x, r.y, r.x + r.w, r.y + r.h) end)
+    local col, al = chrome(ass, p, name, r, false)
+    if name == "new" then g_line(ass, r, col, al, true, k)
+    else mtext(ass, r.x + r.w / 2, r.y + r.h / 2, math.max(13, math.floor(p.fs * 1.05)), col, al, "?", 5) end
+  end
+  if b.night then
+    local r = b.night
+    local lvl = hud.night or 0
+    shape(ass, INK, 0xA8, function(d) d:rect_cw(r.x, r.y, r.x + r.w, r.y + r.h) end)
+    local col, al = chrome(ass, p, "night", r, lvl > 0)
+    local word, sub
+    if r.w >= r.h * 3 then word, sub = "NIGHT", ({ "OFF", "DIM", "DIMMER" })[lvl + 1]
+    elseif r.w >= r.h * 1.8 then word = ({ "OFF", "DIM", "DIM+" })[lvl + 1]
+    else word = "N" end
+    local fs2 = math.max(13, math.floor(math.min(r.h * 0.46, r.w / (sub and 8 or #word) * 1.15)))
+    if lvl > 0 then
+      shape(ass, ACCENT, 0x00, function(d)
+        d:rect_cw(r.x, r.y, r.x + r.w, r.y + math.max(2, math.floor(r.h * 0.14)))
+      end)
+    end
+    if sub then
+      local pad = math.max(6, math.floor(r.h * 0.22))
+      mtext(ass, r.x + pad, r.y + r.h / 2, fs2, col, al, word, 4, "\\b1\\fsp1")
+      mtext(ass, r.x + r.w - pad, r.y + r.h / 2, math.max(13, math.floor(fs2 * 0.86)), lvl > 0 and "E6FFE0" or col, al, sub, 6, "\\b1")
+    else
+      mtext(ass, r.x + r.w / 2, r.y + r.h / 2, fs2, col, al, word, 5, "\\b1\\fsp1")
+    end
+  end
+  if hud.keyhints and not state.dragging and not state.vdrag then keycaps(ass, p, b) end   -- KEY HINTS (? panel, T): on every control, no hover; off by default
+  local ht = state.htag                          -- hover seek tag: top z, mm:ss.mmm, clamped to the bar
+  if ht and HUD() then
+    local t = math.max(0, ht.t)
+    local hh, mm, ss = math.floor(t / 3600), math.floor(t / 60) % 60, t % 60
+    local s = hh > 0 and string.format("%d:%02d:%06.3f", hh, mm, ss) or string.format("%02d:%06.3f", mm, ss)
+    local r = ht.r
+    local fw = math.floor(p.fs * 1.2)
+    local tw, th2 = math.floor(#s * fw * 0.62 + fw * 1.2), math.floor(fw * 1.75)
+    local k = math.max(4, math.floor(fw * 0.35))                 -- notch down to the pointer
+    local L, R = (p.x or 0) + 4, (p.x or 0) + (p.w or w) - 4
+    local tx = math.floor(math.max(L, math.min(R - tw, ht.mx - tw / 2)))
+    local ty = math.floor(r.y - th2 - k - 2)
+    local nx = math.max(tx + k + 2, math.min(tx + tw - k - 2, ht.mx))
+    shape(ass, INK, 0x00, function(d) d:rect_cw(tx, ty, tx + tw, ty + th2) end)
+    shape(ass, ACCENT, 0x00, function(d)
+      outline(d, tx, ty, tw, th2, math.max(1, p.t))
+      tri(d, nx - k, ty + th2, nx + k, ty + th2, nx, ty + th2 + k)
+      d:rect_cw(ht.mx, ty + th2 + k, ht.mx + 1, r.y + math.floor(r.h / 2))
+    end)
+    mtext(ass, tx + tw / 2, ty + th2 / 2, fw, "FFFFFF", 0x00, s, 5, "\\b1\\fsp1")
+  end
+  state.htag = nil
+  ov.res_x, ov.res_y, ov.data = w, h, ass.text
+  ov:update()
+end
+
+-- input section: only the bar captures clicks ----------------------------------------------
+local function publish()  -- user-data/omaraptor-hud: handy for IPC checks
+  mp.set_property_native("user-data/omaraptor-hud", { visible = state.visible, position = "bottom",
+    panel = state.panel, pinned = hud.pin, night = hud.night or 0 })
+end
+
+local tips_open = false
+local function set_section(on)
+  if on and state.panel then
+    local p, hb = state.panel, state.buttons.help
+    mp.set_mouse_area(p.x, p.y, p.x + p.w, p.y + p.h, SECTION)
+    if hb then mp.set_mouse_area(hb.x, hb.y, hb.x + hb.w, hb.y + hb.h, HELP_SECTION) end
+    local nb2 = state.buttons.night
+    if nb2 then mp.set_mouse_area(nb2.x, nb2.y, nb2.x + nb2.w, nb2.y + nb2.h, hud.NIGHT_SECTION)
+    else mp.set_mouse_area(0, 0, 0, 0, hud.NIGHT_SECTION) end
+    local nb = state.buttons.new
+    if nb then mp.set_mouse_area(nb.x, nb.y, nb.x + nb.w, nb.y + nb.h, NEW_SECTION) end
+    for k, sec in pairs(TAPES) do
+      local r = state.buttons[k]; r = r and (r.grab or r)
+      if r then mp.set_mouse_area(r.x, r.y, r.x + r.w, r.y + r.h, sec) else mp.set_mouse_area(0, 0, 0, 0, sec) end
+    end
+    if not state.section_on then
+      -- no "allow-vo-dragging": a press on the bar must not start a window drag
+      mp.input_enable_section(SECTION, "allow-hide-cursor")
+      mp.input_enable_section(HELP_SECTION, "allow-hide-cursor")
+      mp.input_enable_section(hud.NIGHT_SECTION, "allow-hide-cursor")
+      mp.input_enable_section(NEW_SECTION, "allow-hide-cursor")
+      for _, sec in pairs(TAPES) do mp.input_enable_section(sec, "allow-hide-cursor") end
+      state.section_on = true
+      if tips_open then   -- keep the open panel's section on top of the bar
+        mp.input_disable_section(TIPS_SECTION); mp.input_enable_section(TIPS_SECTION)
+      end
+      if hud.card_raise then hud.card_raise() end
+    end
+  elseif not on and state.section_on then
+    mp.input_disable_section(SECTION)
+    mp.input_disable_section(HELP_SECTION)
+    mp.input_disable_section(hud.NIGHT_SECTION)
+    mp.input_disable_section(NEW_SECTION)
